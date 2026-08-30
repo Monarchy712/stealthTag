@@ -1,0 +1,32 @@
+# Repo-root safety net.
+#
+# The app's own rules live in stealthtag/.gitignore. These duplicates exist so
+# that `git add -A` run from the REPOSITORY ROOT can never sweep in build
+# output, dependencies, or secrets — which is exactly how 118k node_modules
+# files and a .env.local ended up staged once.
+
+# dependencies
+node_modules/
+**/node_modules/
+
+# build output
+.next/
+**/.next/
+build/
+out/
+*.tsbuildinfo
+next-env.d.ts
+
+# secrets — never commit these
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# misc
+.DS_Store
+*.pem
+*.log
+.vercel
