@@ -10,7 +10,7 @@
  * Recipient scans: getLogs for Announcement events, then filters with view tag + detection.
  */
 
-import { type WalletClient, type PublicClient, parseEventLogs } from 'viem';
+import { type WalletClient, type PublicClient } from 'viem';
 import {
   CONTRACT_ADDRESSES,
   ANNOUNCER_ABI,
@@ -63,7 +63,6 @@ export async function publishAnnouncement(
 // ===========================================================
 
 const DEFAULT_FROM_BLOCK = BigInt(0);
-const MAX_BLOCK_RANGE = BigInt(2000); // Limit range to avoid RPC rate limits
 
 /**
  * Fetch all Announcement events from the ERC-5564 Announcer.
@@ -90,15 +89,27 @@ export async function fetchAnnouncements(
       toBlock,
     });
 
-    return logs.map((log) => ({
-      schemeId: (log.args as any).schemeId ?? STEALTH_SCHEME_ID,
-      stealthAddress: (log.args as any).stealthAddress as `0x${string}`,
-      ephemeralPubKey: (log.args as any).ephemeralPubKey as `0x${string}`,
-      metadata: (log.args as any).metadata as `0x${string}`,
-      blockNumber: log.blockNumber ?? 0n,
-      transactionHash: log.transactionHash as `0x${string}`,
-      caller: (log.args as any).caller as `0x${string}`,
-    }));
+    return logs.map((log) => {
+      // viem decodes the indexed/non-indexed params from ANNOUNCER_ABI, but
+      // types them all optional because a malformed log could omit any of them.
+      const args = log.args as Partial<{
+        schemeId: bigint;
+        stealthAddress: `0x${string}`;
+        caller: `0x${string}`;
+        ephemeralPubKey: `0x${string}`;
+        metadata: `0x${string}`;
+      }>;
+
+      return {
+        schemeId: args.schemeId ?? STEALTH_SCHEME_ID,
+        stealthAddress: args.stealthAddress as `0x${string}`,
+        ephemeralPubKey: args.ephemeralPubKey as `0x${string}`,
+        metadata: args.metadata as `0x${string}`,
+        blockNumber: log.blockNumber ?? 0n,
+        transactionHash: log.transactionHash as `0x${string}`,
+        caller: args.caller as `0x${string}`,
+      };
+    });
   } catch (err) {
     console.error('Failed to fetch announcements:', err);
     return [];

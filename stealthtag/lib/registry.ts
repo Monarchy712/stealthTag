@@ -7,7 +7,7 @@
  * Recipients register their meta-address once; senders resolve it before paying.
  */
 
-import { type WalletClient, type PublicClient, encodePacked, hexToBytes } from 'viem';
+import { type WalletClient, type PublicClient } from 'viem';
 import {
   CONTRACT_ADDRESSES,
   REGISTRY_ABI,

@@ -31,12 +31,28 @@ import { scanAnnouncements } from '@/lib/stealth';
 import { getDemoAnnouncements, shouldUseDemoMode } from '@/lib/demo';
 import type { DetectedPayment, StealthKeyBundle } from '@/types';
 
+/** What a completed scan actually covered. Surfaced so the UI can never let a
+ *  user read "no payments found" as "no payments exist". */
+export interface ScanRange {
+  fromBlock: bigint;
+  toBlock: bigint;
+  blocksScanned: bigint;
+  announcementsSeen: number;
+}
+
+/** Default look-back. Bounded because public RPC providers cap `eth_getLogs`
+ *  ranges; it is a provider limit, not a privacy or correctness choice. */
+export const DEFAULT_SCAN_BLOCKS = 5000n;
+
 interface UseScannerReturn {
   detectedPayments: DetectedPayment[];
   scanning: boolean;
   error: string | null;
-  scan: (keyBundle: StealthKeyBundle, fromBlock?: bigint) => Promise<void>;
+  /** @param lookBackBlocks how many blocks back from head to scan */
+  scan: (keyBundle: StealthKeyBundle, lookBackBlocks?: bigint) => Promise<void>;
   clearDetected: () => void;
+  /** Range covered by the last completed scan; null before the first scan. */
+  lastScan: ScanRange | null;
   isDemoMode: boolean;
 }
 
@@ -49,15 +65,17 @@ export function useScanner(): UseScannerReturn {
   const [detectedPayments, setDetectedPayments] = useState<DetectedPayment[]>([]);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lastScan, setLastScan] = useState<ScanRange | null>(null);
   const demoMode = shouldUseDemoMode();
 
   const scan = useCallback(
-    async (keyBundle: StealthKeyBundle, fromBlock?: bigint) => {
+    async (keyBundle: StealthKeyBundle, lookBackBlocks: bigint = DEFAULT_SCAN_BLOCKS) => {
       setScanning(true);
       setError(null);
 
       try {
         let announcements;
+        let range: ScanRange | null = null;
 
         if (demoMode) {
           // Demo mode: use pre-seeded announcements
@@ -66,10 +84,17 @@ export function useScanner(): UseScannerReturn {
           await new Promise((r) => setTimeout(r, 1200)); // simulate scanning delay
           announcements = getDemoAnnouncements();
         } else {
-          // Real mode: fetch from Announcer contract
+          // Real mode: fetch from the Announcer, through the relay.
           const latestBlock = await publicClient.getBlockNumber();
-          const scanFrom = fromBlock ?? (latestBlock > 5000n ? latestBlock - 5000n : 0n);
+          const scanFrom =
+            latestBlock > lookBackBlocks ? latestBlock - lookBackBlocks : 0n;
           announcements = await fetchAnnouncements(scanFrom, 'latest', publicClient);
+          range = {
+            fromBlock: scanFrom,
+            toBlock: latestBlock,
+            blocksScanned: latestBlock - scanFrom,
+            announcementsSeen: announcements.length,
+          };
         }
 
         if (demoMode) {
@@ -106,6 +131,7 @@ export function useScanner(): UseScannerReturn {
 
           setDetectedPayments(withBalances);
         }
+        setLastScan(range);
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : 'Unknown error';
         setError(`Scanning failed: ${message}`);
@@ -126,6 +152,7 @@ export function useScanner(): UseScannerReturn {
     error,
     scan,
     clearDetected,
+    lastScan,
     isDemoMode: demoMode,
   };
 }

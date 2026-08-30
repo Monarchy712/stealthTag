@@ -15,7 +15,8 @@
     "test:sweep": "tsx scripts/test-sweep-local.ts",
     "anvil": "anvil --fork-url ${SEPOLIA_RPC_URL:-https://ethereum-sepolia-rpc.publicnode.com} --port 8545 --hardfork prague",
     "test:all": "npm run test && npm run test:sweep",
-    "verify:live": "tsx scripts/verify-live-sponsored.ts"
+    "verify:live": "tsx scripts/verify-live-sponsored.ts",
+    "test:ui": "tsx scripts/test-ui.ts"
   },
   "dependencies": {
     "@noble/curves": "1.9.1",
@@ -39,6 +40,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.3.3",
+    "playwright": "^1.62.1",
     "tailwindcss": "^4",
     "tsx": "^4.23.13",
     "typescript": "^5"

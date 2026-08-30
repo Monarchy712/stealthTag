@@ -60,23 +60,46 @@ export default function SendPage() {
     try {
       let meta: string | null = null;
 
-      if (handle.startsWith('st:eth:') || handle.startsWith('0x04')) {
-        // Direct meta-address paste
-        meta = handle.startsWith('0x') ? `st:eth:${handle}` : handle;
-      } else if (isAddress(handle)) {
+      const trimmed = handle.trim();
+
+      // A pasted meta-address. ERC-5564 Scheme 1 uses two COMPRESSED secp256k1
+      // keys, so the payload is 132 hex chars starting 0x02/0x03 — NOT the
+      // 0x04 uncompressed prefix. Validate by parsing rather than by prefix,
+      // so a malformed paste fails here with a clear message instead of
+      // surfacing as an opaque SDK error later.
+      const looksLikeMetaAddress =
+        trimmed.startsWith('st:eth:') ||
+        (trimmed.startsWith('0x') && trimmed.replace('0x', '').length >= 66);
+
+      if (looksLikeMetaAddress) {
+        const candidate = trimmed.startsWith('st:eth:') ? trimmed : `st:eth:${trimmed}`;
+        try {
+          parseMetaAddress(candidate);
+        } catch (parseErr) {
+          setResolveState({
+            status: 'failed',
+            error:
+              parseErr instanceof Error
+                ? `Invalid meta-address: ${parseErr.message}`
+                : 'Invalid meta-address.',
+          });
+          return;
+        }
+        meta = candidate;
+      } else if (isAddress(trimmed)) {
         // EOA address — look up registry
-        meta = await resolveMetaAddress(handle as `0x${string}`, publicClient as any);
+        meta = await resolveMetaAddress(trimmed as `0x${string}`, publicClient as never);
         if (!meta) {
           setResolveState({
             status: 'failed',
-            error: `Address ${handle} has not registered a StealthTag. Ask them to set up at /setup.`,
+            error: `${trimmed} has no StealthTag registered in the ERC-6538 Registry on Sepolia. Ask them to register at /setup, or paste their meta-address directly.`,
           });
           return;
         }
       } else {
         setResolveState({
           status: 'failed',
-          error: 'Enter a valid stealth meta-address (st:eth:0x...) or an Ethereum address.',
+          error: 'Enter a stealth meta-address (st:eth:0x…, 132 hex chars) or a registered Ethereum address.',
         });
         return;
       }
@@ -86,10 +109,10 @@ export default function SendPage() {
       setResolvedMeta(meta);
       setDerived(derivedAddr);
       setResolveState({ status: 'confirmed' });
-    } catch (err: any) {
+    } catch (err: unknown) {
       setResolveState({
         status: 'failed',
-        error: `Failed to resolve: ${err?.message ?? 'Unknown error'}`,
+        error: `Failed to resolve: ${err instanceof Error ? err.message : 'Unknown error'}`,
       });
     }
   }
@@ -106,12 +129,11 @@ export default function SendPage() {
         value: parseEther(amount),
       });
       setSendState({ status: 'confirmed', hash });
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Send failed';
       setSendState({
         status: 'failed',
-        error: err?.message?.includes('rejected')
-          ? 'Transaction rejected'
-          : err?.message ?? 'Send failed',
+        error: message.includes('rejected') ? 'Transaction rejected in your wallet' : message,
       });
     }
   }
@@ -128,10 +150,11 @@ export default function SendPage() {
         derived.viewTag,
       );
       setAnnounceState({ status: 'confirmed', hash });
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Announcement failed';
       setAnnounceState({
         status: 'failed',
-        error: err?.message ?? 'Announcement failed',
+        error: message.includes('rejected') ? 'Announcement rejected in your wallet' : message,
       });
     }
   }
@@ -174,8 +197,10 @@ export default function SendPage() {
       {/* Explainer */}
       <AlertBox type="info">
         Each payment derives a <strong>fresh, unique one-time address</strong> from the recipient&apos;s
-        handle via ECDH (ERC-5564). Even if you pay the same handle twice, the two stealth
-        addresses are different — and unlinked on-chain.
+        handle via ECDH (ERC-5564). You send <strong>directly</strong> to that address — there is no
+        forwarding or decoy wallet in between. Pay the same handle twice and the two stealth
+        addresses are different, and cannot be linked <em>from the announcements alone</em>.
+        Your own wallet is still the visible sender of both, and both amounts are public.
       </AlertBox>
 
       <div className="space-y-4 mt-6">
@@ -190,7 +215,7 @@ export default function SendPage() {
               type="text"
               value={handle}
               onChange={(e) => setHandle(e.target.value)}
-              placeholder="st:eth:0x... or 0x (EOA address with registered StealthTag)"
+              placeholder="st:eth:0x… (meta-address) or 0x… (address registered in ERC-6538)"
               className="flex-1 bg-gray-950 border border-gray-700 rounded-xl px-4 py-2.5 text-sm text-gray-200 placeholder:text-gray-600 focus:outline-none focus:border-indigo-600 font-mono"
             />
             <Button
@@ -304,10 +329,16 @@ export default function SendPage() {
             <div className="flex items-start gap-3">
               <CheckCircle2 className="w-6 h-6 text-emerald-400 flex-shrink-0 mt-0.5" />
               <div>
-                <h3 className="font-bold text-white mb-1">Payment sent unlinkably ✓</h3>
+                <h3 className="font-bold text-white mb-1">Payment sent ✓</h3>
                 <p className="text-sm text-gray-400">
-                  The recipient will detect this payment in their scanner using their viewing key.
-                  From an on-chain observer&apos;s perspective, this is just a transfer to a random address.
+                  The recipient will detect this payment with their viewing key. An observer sees a
+                  transfer from your wallet to an address with no prior history, and cannot tell
+                  which identity it belongs to from the announcement alone.
+                </p>
+                <p className="text-xs text-amber-400/90 mt-2">
+                  Still public: <strong>you</strong> are the sender of both the transfer and the
+                  announcement, and the amount is visible. This protects the recipient&apos;s
+                  payment-to-payment linkability, not your identity as the sender.
                 </p>
                 <div className="flex flex-wrap gap-2 mt-3">
                   <Badge variant="success">Funds delivered</Badge>

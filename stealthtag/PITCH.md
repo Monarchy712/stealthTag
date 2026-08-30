@@ -11,7 +11,7 @@ Ethereum Research Workshop & Builders Lab · IIIT Nagpur × Bhaisaaab
 ---
 
 ## One-Line Pitch
-> Publish one payment handle. Receive every payment at a fresh, unlinkable one-time address — only you know they're connected.
+> Publish one payment handle. Receive every payment at a fresh one-time address that observers cannot link to each other from the announcements alone.
 
 ---
 
@@ -41,7 +41,7 @@ This is a fundamental UX and privacy failure for creators, freelancers, merchant
 ## Target Users
 
 - **Creators** — Accept donations without exposing earnings
-- **Freelancers** — Invoice clients privately; competitors can't see your cash flow
+- **Freelancers** — Invoice from one handle without publishing a single address that totals every client payment
 - **Merchants** — Accept on-chain payments without revealing sales volume
 - **Anyone** — Who wants to receive payments without publishing a permanent identity
 
@@ -51,7 +51,7 @@ This is a fundamental UX and privacy failure for creators, freelancers, merchant
 
 - ERC-5564 and ERC-6538 are Ethereum-native standards with canonical deployments
 - ERC-4337 smart accounts and paymasters are live on Sepolia
-- Transparent ledger + stealth addresses = provably unlinkable payments (math-backed)
+- Transparent ledger + stealth addresses = payments that cannot be linked to each other from on-chain announcements alone (ECDH-backed)
 - Composable: ENS, smart accounts, and stealth addresses work together natively
 
 ---
@@ -60,7 +60,7 @@ This is a fundamental UX and privacy failure for creators, freelancers, merchant
 
 **This is load-bearing, not decorative.**
 
-Sweeping from a stealth address requires gas at that address. Funding it from your main wallet links the two addresses — destroying the privacy guarantee. A Pimlico **Verifying Paymaster** sponsors the gas for the sweep UserOperation. The stealth address is never funded from a known wallet.
+Sweeping from a stealth address requires gas at that address. Funding it from your main wallet publishes a link between them. A Pimlico **Verifying Paymaster** sponsors the gas for the sweep UserOperation, and EIP-7702 makes the stealth EOA itself the ERC-4337 sender, so the stealth address is never funded from a known wallet. Sponsorship solves gas; it is not a privacy mechanism on its own.
 
 Without AA, the stealth scheme would require either:
 - Losing privacy at the sweep step, or
@@ -74,7 +74,9 @@ AA makes the scheme practical.
 
 > **Unlinkable payment receiving via one published handle, made sweep-practical by a sponsored Paymaster.**
 
-Each payment to the same handle lands at a computationally unlinkable on-chain address. The recipient collects them all via a single viewing key scan and a batch (or individual) sponsored sweep. No third party learns anything — not the bundler, not the RPC provider, and certainly not chain observers.
+Each payment to the same handle lands at a distinct on-chain address that observers cannot group from the announcements alone. The recipient finds them all with one viewing-key scan and sweeps them with sponsored UserOperations, so no stealth address ever needs gas from a known wallet.
+
+What third parties still learn, stated plainly: the **relay** sees the user's IP, the addresses scanned, and every UserOperation; the **bundler and Paymaster** see each sponsored operation and can group them by API key; **chain observers** see amounts, timing, and the sweep destination. StealthTag reduces linkability between payments — it does not make anyone anonymous. See `PRIVACY.md` for the actor-by-actor breakdown.
 
 ---
 
@@ -123,7 +125,7 @@ Recipient ← ERC-5564 Announcer (scan events)
 |---------|--------|
 | Batch sweep (N addresses in 1 UserOp) | Fewer transactions, lower total cost |
 | ENS-mapped handles (`you.eth` → meta-address) | Human-readable payment addresses |
-| Private RPC scanning | Prevent IP-level correlation |
+| Relayed RPC scanning | Reduce IP-level correlation with the upstream provider (the relay operator still sees it) |
 | Passkey/social login | No EOA required for recipients |
 | Amount splitting | Reduce amount-correlation attack surface |
 | Multi-chain | Base, Arbitrum, Optimism |

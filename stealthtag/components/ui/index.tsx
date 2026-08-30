@@ -20,9 +20,17 @@ export function Card({ children, className = '' }: CardProps) {
 }
 
 // ── Badge ────────────────────────────────────────────────────
+export type BadgeVariant =
+  | 'default'
+  | 'success'
+  | 'warning'
+  | 'error'
+  | 'info'
+  | 'demo';
+
 interface BadgeProps {
   children: ReactNode;
-  variant?: 'default' | 'success' | 'warning' | 'error' | 'info' | 'demo';
+  variant?: BadgeVariant;
 }
 export function Badge({ children, variant = 'default' }: BadgeProps) {
   const styles = {
@@ -111,7 +119,7 @@ export function TxStatusBadge({
     simulated: '[DEMO] Simulated',
   };
 
-  const variant =
+  const variant: BadgeVariant =
     state.status === 'confirmed'
       ? state.isSimulated
         ? 'demo'
@@ -124,7 +132,7 @@ export function TxStatusBadge({
 
   return (
     <div className="flex flex-col gap-1">
-      <Badge variant={variant as any}>
+      <Badge variant={variant}>
         {icons[state.status]}
         {label[state.status]}
       </Badge>

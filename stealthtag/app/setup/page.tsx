@@ -45,8 +45,14 @@ export default function SetupPage() {
     try {
       const hash = await registerMetaAddress(walletClient, publicBundle.metaAddress);
       setRegState({ status: 'confirmed', hash });
-    } catch (err: any) {
-      setRegState({ status: 'failed', error: err?.message ?? 'Registration failed' });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Registration failed';
+      setRegState({
+        status: 'failed',
+        error: message.includes('rejected')
+          ? 'Registration rejected in your wallet'
+          : message,
+      });
     }
   }
 

@@ -37,7 +37,7 @@ export default function ExplorePage() {
     <div className="max-w-4xl mx-auto px-4 py-12">
       <SectionHeading
         badge="Unlinkability Demo"
-        title='Find the link — you can&apos;t'
+        title="Find the link — you can&apos;t"
         subtitle="This is what an on-chain observer sees when they try to trace payments to your handle."
       />
 
@@ -53,7 +53,9 @@ export default function ExplorePage() {
               Try to connect the addresses to each other, or to the handle.
             </p>
             <p className="text-xs text-gray-500 mt-2">
-              Hint: you can't — without the viewing key, the ECDH link is computationally infeasible.
+              Hint: you can&apos;t link them from these announcements alone — without the viewing
+              key, recovering the ECDH shared secret is computationally infeasible. Amounts,
+              timing and sweep destinations are still visible, and can link them by other means.
             </p>
           </div>
         </div>
@@ -208,20 +210,20 @@ export default function ExplorePage() {
         ) : (
           <div className="space-y-4 text-xs text-gray-400">
             <div className="bg-gray-950 rounded-xl p-4 font-mono space-y-2">
-              <p className="text-indigo-300">// For each payment:</p>
-              <p>ephemeralKey = generateRandomPrivateKey()     <span className="text-gray-600">// fresh per payment</span></p>
-              <p>E = ephemeralKey × G                          <span className="text-gray-600">// ephemeral pubkey</span></p>
-              <p>S = ephemeralKey × K_spend                   <span className="text-gray-600">// ECDH shared secret</span></p>
-              <p>h = keccak256(S)                              <span className="text-gray-600">// hash of secret</span></p>
-              <p>stealthAddr = (h × G) + K_spend               <span className="text-gray-600">// one-time address</span></p>
-              <p>viewTag = h[0]                                <span className="text-gray-600">// first byte, for scan speedup</span></p>
+              <p className="text-indigo-300">{'// For each payment:'}</p>
+              <p>ephemeralKey = generateRandomPrivateKey()     <span className="text-gray-600">{'// fresh per payment'}</span></p>
+              <p>E = ephemeralKey × G                          <span className="text-gray-600">{'// ephemeral pubkey'}</span></p>
+              <p>S = ephemeralKey × K_view                    <span className="text-gray-600">{'// ECDH shared secret (VIEWING key)'}</span></p>
+              <p>h = keccak256(S)                              <span className="text-gray-600">{'// hash of secret'}</span></p>
+              <p>stealthAddr = (h × G) + K_spend               <span className="text-gray-600">{'// one-time address'}</span></p>
+              <p>viewTag = h[0]                                <span className="text-gray-600">{'// first byte, for scan speedup'}</span></p>
             </div>
             <div className="bg-gray-950 rounded-xl p-4 font-mono space-y-2">
-              <p className="text-violet-300">// Recipient detection (with viewing key):</p>
-              <p>S&apos; = viewingKey × E                          <span className="text-gray-600">// same shared secret!</span></p>
-              <p>h&apos; = keccak256(S&apos;)                            <span className="text-gray-600">// same hash</span></p>
-              <p>check viewTag match                           <span className="text-gray-600">// 256× speedup</span></p>
-              <p>reconstruct stealthAddr from h&apos; + K_spend     <span className="text-gray-600">// confirm match</span></p>
+              <p className="text-violet-300">{'// Recipient detection (with viewing key):'}</p>
+              <p>S&apos; = viewingKey × E                          <span className="text-gray-600">{'// same shared secret!'}</span></p>
+              <p>h&apos; = keccak256(S&apos;)                            <span className="text-gray-600">{'// same hash'}</span></p>
+              <p>check viewTag match                           <span className="text-gray-600">{'// 256× speedup'}</span></p>
+              <p>reconstruct stealthAddr from h&apos; + K_spend     <span className="text-gray-600">{'// confirm match'}</span></p>
             </div>
             <AlertBox type="info">
               The ephemeral public key E is published in the ERC-5564 Announcer.

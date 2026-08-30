@@ -37,7 +37,7 @@ import {
   TxStatusBadge,
 } from '@/components/ui';
 import { useStealthKeys } from '@/hooks/useStealthKeys';
-import { useScanner } from '@/hooks/useScanner';
+import { useScanner, DEFAULT_SCAN_BLOCKS } from '@/hooks/useScanner';
 import { useSweep } from '@/hooks/useSweep';
 import type { DetectedPayment } from '@/types';
 import type { GasMode } from '@/lib/smartAccount';
@@ -45,7 +45,8 @@ import type { GasMode } from '@/lib/smartAccount';
 export default function ScanPage() {
   const { address, isConnected } = useAccount();
   const { keyBundle, keyState } = useStealthKeys();
-  const { detectedPayments, scanning, error: scanError, scan, isDemoMode } = useScanner();
+  const { detectedPayments, scanning, error: scanError, scan, lastScan, isDemoMode } =
+    useScanner();
   const {
     sweepState,
     sweep,
@@ -62,6 +63,11 @@ export default function ScanPage() {
   // Sponsored vs self-funded gas is a genuine privacy tradeoff, so it is the
   // user's choice rather than a hidden default. See PRIVACY.md §3.
   const [gasMode, setGasMode] = useState<GasMode>('sponsored');
+
+  // How far back to scan. Explicit and adjustable: the RPC caps eth_getLogs
+  // ranges, so a bounded scan is a provider constraint — and a user must never
+  // read "nothing found" as "nothing was ever sent".
+  const [lookBack, setLookBack] = useState<string>(DEFAULT_SCAN_BLOCKS.toString());
 
   const [sweepingIdx, setSweepingIdx] = useState<number | null>(null);
   const [swept, setSwept] = useState<Record<string, string>>({}); // addr → txHash
@@ -99,13 +105,15 @@ export default function ScanPage() {
             </Button>
           </Link>
         </div>
+        <SponsorshipPanel />
       </PageShell>
     );
   }
 
   async function handleScan() {
     if (!keyBundle) return;
-    await scan(keyBundle);
+    const parsed = BigInt(Number.parseInt(lookBack, 10) || Number(DEFAULT_SCAN_BLOCKS));
+    await scan(keyBundle, parsed > 0n ? parsed : DEFAULT_SCAN_BLOCKS);
   }
 
   const destinationIsValid = /^0x[0-9a-fA-F]{40}$/.test(destination.trim());
@@ -144,39 +152,7 @@ export default function ScanPage() {
         </AlertBox>
       )}
 
-      {/* What sponsorship does and does not do */}
-      <Card className="mt-4 bg-indigo-950/20 border-indigo-800/30">
-        <div className="flex items-start gap-3">
-          <Zap className="w-5 h-5 text-indigo-400 flex-shrink-0 mt-0.5" />
-          <div className="space-y-2">
-            <p className="text-sm font-semibold text-white">
-              Three separate things — only one of them is privacy
-            </p>
-            <ul className="text-xs text-gray-400 leading-relaxed space-y-1.5">
-              <li>
-                <strong className="text-indigo-300">Stealth addresses (ERC-5564)</strong> give
-                unlinkability <em>between payments</em>. Each payment lands at a fresh address.
-              </li>
-              <li>
-                <strong className="text-indigo-300">Paymaster sponsorship</strong> solves{' '}
-                <em>gas</em>, nothing more. Your stealth address is an EOA with no ETH for fees;
-                funding it from your main wallet would publish the link. EIP-7702 lets the stealth
-                address itself execute a sponsored UserOperation, so it never needs that transfer.
-              </li>
-              <li>
-                <strong className="text-indigo-300">The relay</strong> reduces <em>network</em>{' '}
-                correlation: Pimlico and the RPC provider see the relay server, not your IP. The
-                relay operator still sees it. This is a trust boundary, not anonymity.
-              </li>
-            </ul>
-            <p className="text-xs text-amber-400/90 leading-relaxed pt-1">
-              None of this hides the sweep itself. Whatever address you sweep to is published
-              on-chain right next to the stealth address, and the amounts match. Sweeping to
-              your public wallet re-links everything.
-            </p>
-          </div>
-        </div>
-      </Card>
+      <SponsorshipPanel />
 
       {/* Scanner */}
       <Card className="mt-4">
@@ -190,11 +166,50 @@ export default function ScanPage() {
               </p>
             </div>
           </div>
-          <Button onClick={handleScan} loading={scanning}>
-            <Radar className="w-4 h-4" />
-            {scanning ? 'Scanning…' : detectedPayments.length > 0 ? 'Rescan' : 'Scan now'}
-          </Button>
+          <div className="flex items-end gap-2">
+            <div>
+              <label htmlFor="look-back" className="block text-[11px] text-gray-500 mb-1">
+                Blocks to scan
+              </label>
+              <input
+                id="look-back"
+                type="number"
+                min="1"
+                step="1000"
+                value={lookBack}
+                onChange={(e) => setLookBack(e.target.value)}
+                disabled={scanning}
+                className="w-28 bg-gray-950 border border-gray-800 rounded-xl px-3 py-2 text-sm
+                           text-gray-200 font-mono focus:outline-none focus:border-indigo-600"
+              />
+            </div>
+            <Button onClick={handleScan} loading={scanning}>
+              <Radar className="w-4 h-4" />
+              {scanning ? 'Scanning…' : detectedPayments.length > 0 ? 'Rescan' : 'Scan now'}
+            </Button>
+          </div>
         </div>
+
+        {!isDemoMode && (
+          <AlertBox type="info">
+            <p className="text-xs leading-relaxed">
+              This scans only the <strong>last {Number(lookBack).toLocaleString()} blocks</strong>
+              {' '}(~{Math.round((Number(lookBack) * 12) / 3600)}h on Sepolia). Public RPC providers
+              cap <code>eth_getLogs</code> ranges, so the window is bounded by the provider, not by
+              StealthTag. <strong>&ldquo;No payments found&rdquo; means none in this window</strong> —
+              not that none exist. Increase the range to look further back.
+            </p>
+          </AlertBox>
+        )}
+
+        {lastScan && !scanning && (
+          <p className="text-[11px] text-gray-500 mt-3 font-mono">
+            Last scan: blocks {lastScan.fromBlock.toString()} → {lastScan.toBlock.toString()} (
+            {lastScan.blocksScanned.toString()} blocks, {lastScan.announcementsSeen} announcement
+            {lastScan.announcementsSeen === 1 ? '' : 's'} seen,{' '}
+            {detectedPayments.length} for you)
+          </p>
+        )}
 
         {scanning && (
           <div className="flex items-center gap-3 py-6 justify-center">
@@ -215,7 +230,9 @@ export default function ScanPage() {
           <p className="text-center text-gray-600 text-sm py-6">
             {isDemoMode
               ? 'Click Scan now to load demo payments'
-              : 'No payments detected yet. Send some test ETH to your handle first.'}
+              : lastScan
+              ? `No payments for you in the last ${lastScan.blocksScanned.toString()} blocks. Increase the range above to look further back.`
+              : 'Click Scan now to search the ERC-5564 Announcer for payments to your handle.'}
           </p>
         )}
       </Card>
@@ -475,6 +492,47 @@ function DetectedPaymentCard({
         </div>
       )}
     </Card>
+  );
+}
+
+
+// ── What sponsorship does and does not do ─────────────────────
+// Rendered on the gated view too: a user who has not yet derived keys is
+// exactly the user most likely to misread "gas sponsored" as "anonymous".
+function SponsorshipPanel() {
+  return (
+  <Card className="mt-4 bg-indigo-950/20 border-indigo-800/30">
+    <div className="flex items-start gap-3">
+      <Zap className="w-5 h-5 text-indigo-400 flex-shrink-0 mt-0.5" />
+      <div className="space-y-2">
+        <p className="text-sm font-semibold text-white">
+          Three separate things — only one of them is privacy
+        </p>
+        <ul className="text-xs text-gray-400 leading-relaxed space-y-1.5">
+          <li>
+            <strong className="text-indigo-300">Stealth addresses (ERC-5564)</strong> give
+            unlinkability <em>between payments</em>. Each payment lands at a fresh address.
+          </li>
+          <li>
+            <strong className="text-indigo-300">Paymaster sponsorship</strong> solves{' '}
+            <em>gas</em>, nothing more. Your stealth address is an EOA with no ETH for fees;
+            funding it from your main wallet would publish the link. EIP-7702 lets the stealth
+            address itself execute a sponsored UserOperation, so it never needs that transfer.
+          </li>
+          <li>
+            <strong className="text-indigo-300">The relay</strong> reduces <em>network</em>{' '}
+            correlation: Pimlico and the RPC provider see the relay server, not your IP. The
+            relay operator still sees it. This is a trust boundary, not anonymity.
+          </li>
+        </ul>
+        <p className="text-xs text-amber-400/90 leading-relaxed pt-1">
+          None of this hides the sweep itself. Whatever address you sweep to is published
+          on-chain right next to the stealth address, and the amounts match. Sweeping to
+          your public wallet re-links everything.
+        </p>
+      </div>
+    </div>
+  </Card>
   );
 }
 

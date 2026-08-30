@@ -41,11 +41,20 @@ export const DEMO_META_ADDRESS = DEMO_BUNDLE.metaAddress;
 
 // Real ERC-5564 derivations against the demo meta-address. Each entry is a
 // distinct one-time stealth address, exactly as a real sender would produce.
-const DEMO_DERIVATIONS = [
-  deriveStealthAddress(DEMO_META_ADDRESS),
-  deriveStealthAddress(DEMO_META_ADDRESS),
-  deriveStealthAddress(DEMO_META_ADDRESS),
-];
+//
+// The ephemeral keys are FIXED here. They must be: this module is evaluated on
+// the server during prerender and again in the browser, and a random ephemeral
+// key would make the two disagree — which showed up as React hydration error
+// #418 on /explore. Fixed ephemeral keys keep the ECDH math real while making
+// the fixture stable. Real payments never pass an ephemeral key; see
+// `deriveStealthAddress`.
+const DEMO_EPHEMERAL_KEYS = [0x11, 0x22, 0x33].map((byte) =>
+  new Uint8Array(32).fill(byte),
+);
+
+const DEMO_DERIVATIONS = DEMO_EPHEMERAL_KEYS.map((ephemeralKey) =>
+  deriveStealthAddress(DEMO_META_ADDRESS, ephemeralKey),
+);
 
 export const DEMO_PAYMENTS: DemoPayment[] = [
   {

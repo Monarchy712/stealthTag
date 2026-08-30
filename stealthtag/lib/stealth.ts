@@ -143,12 +143,21 @@ export function parseMetaAddress(metaAddress: string): StealthMetaAddress {
  *
  * @param metaAddress - Recipient's published ERC-5564 meta-address string
  */
-export function deriveStealthAddress(metaAddress: string): DerivedStealthAddress {
+export function deriveStealthAddress(
+  metaAddress: string,
+  ephemeralPrivateKey?: Uint8Array,
+): DerivedStealthAddress {
   const normalizedUri = metaAddress.startsWith('st:eth:') ? metaAddress : `st:eth:${metaAddress}`;
-  
+
+  // `ephemeralPrivateKey` is for reproducible fixtures ONLY (demo data, tests).
+  // Real payments MUST omit it: the SDK then generates a fresh random ephemeral
+  // key, and that randomness is what makes two payments to the same handle
+  // land at unlinkable addresses. Reusing an ephemeral key across payments
+  // would produce the same stealth address twice and destroy unlinkability.
   const result = generateStealthAddress({
     stealthMetaAddressURI: normalizedUri,
     schemeId: VALID_SCHEME_ID.SCHEME_ID_1,
+    ...(ephemeralPrivateKey ? { ephemeralPrivateKey } : {}),
   });
 
   return {

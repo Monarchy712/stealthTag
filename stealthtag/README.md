@@ -1,356 +1,203 @@
 # ROAD TO DEVCON – IIITN EDITION
 
-## StealthTag
-
-> **Publish one payment handle. Receive every payment at a fresh, unlinkable one-time address only you control.**
-
 ### Built At
-Ethereum Research Workshop & Builders Lab  
+Ethereum Research Workshop & Builders Lab
 **IIIT Nagpur × Bhaisaaab**
 
 ---
 
-## Project Overview
+# StealthTag
 
-StealthTag lets anyone publish a **single public payment handle** (a stealth meta-address) while every payment they receive lands at a **fresh, one-time address** that only they can control.
-
-Senders resolve the recipient's published meta-address, derive a unique stealth address using ECDH (ERC-5564), send funds there, and publish the ephemeral public key through the ERC-5564 Announcer contract. The recipient scans those announcements, detects incoming payments using their viewing key and view-tag filtering, then sweeps the funds out — **with gas sponsored by a Paymaster so that no stealth address is ever funded from a known wallet**.
+**Publish one payment handle. Every payment you receive lands at a different address.**
 
 ---
 
 ## The Problem
 
-A public Ethereum address is a public ledger entry. Publishing `0xYou` means:
-- Everyone can see **who** paid you and **how much**
-- Everyone can **total your balance** at any time
-- Your **payment graph** is fully reconstructable — who paid you, when, how often
+If you publish one wallet address, everyone can see every payment you ever receive — who paid you, how often, and your running balance.
 
-For creators, freelancers, merchants, and donees, this is a significant privacy failure.
+Handing out a fresh address for each payment would fix that, but it's unusable: you'd have to give every payer a new address and then track them all yourself.
 
----
-
-## The Solution
-
-StealthTag uses **ERC-5564 stealth addresses** to break the linkability:
-
-1. You publish **one meta-address** (your handle)
-2. Each sender derives a **fresh one-time address** from your meta-address using ECDH — a different address for every payment
-3. Funds land at that one-time address, which looks like any random address on-chain
-4. You detect and sweep each payment using your **viewing key** — without ever funding the stealth addresses from a known wallet
-
-An on-chain observer cannot link multiple payments to the same recipient, cannot total the recipient's balance, and cannot reconstruct the payment graph.
+StealthTag gives you **one identity you can publish** while each payment quietly goes to **its own fresh address** that only you can find.
 
 ---
 
-## Why Account Abstraction?
-
-**This is where AA does real work, not decoration.**
-
-Sweeping funds out of a stealth address requires gas _at that address_. If you top up the stealth address with gas from your main wallet, those two addresses are linked on-chain — and the entire privacy guarantee collapses.
-
-A **Paymaster sponsors the sweep gas**, so funds leave the stealth address via a UserOperation **without the stealth address ever being funded from a known wallet**.
+## How It Works
 
 ```
-Stealth Address → UserOperation → Bundler → EntryPoint → Smart Account execution
-                                                 ↑
-                                           Paymaster sponsors gas
+   Sender
+     |
+     v
+   Your stealth meta-address        <- one public handle, share it anywhere
+     |
+     v
+   Fresh stealth address            <- newly derived, unique to this payment
+     |
+     v
+   You detect it with a viewing key <- only you can find it
+     |
+     v
+   EIP-7702 + ERC-4337 sweep        <- gas paid by a Paymaster, not by you
+     |
+     v
+   Destination you choose
 ```
 
-ERC-4337 Account Abstraction is therefore **load-bearing**, not decorative.
+1. **You publish one handle.** A "stealth meta-address": two public keys joined together. Safe to post publicly.
+2. **The sender derives a fresh address.** Their browser combines your handle with a random one-time key (ECDH). Every payment produces a different address, and the sender pays it **directly** — there is no forwarding or decoy wallet in between.
+3. **The sender posts a hint on-chain.** A small "announcement" holding a random public key and a 1-byte tag. It does not say who the payment is for.
+4. **You scan and detect.** Your *viewing key* checks each announcement. The 1-byte tag discards roughly 255 of every 256 instantly, so scanning stays cheap.
+5. **You sweep.** Your *spending key* reconstructs the private key for that one address and moves the funds wherever you choose.
+
+Your **viewing key** can only *find* payments. Your **spending key** is what *moves* them. They are separate, so you could give someone a viewing key for accounting without giving them any ability to spend.
 
 ---
 
-## Key Features
+## Why ERC-5564?
 
-- 🔑 **One handle, unlimited payments** — publish a single stealth meta-address, receive at distinct one-time addresses
-- 🔍 **Efficient scanning** — ERC-5564 view tags reduce scanning work by ~256×
-- 🚀 **Sponsored sweeps** — Paymaster covers gas so stealth addresses are never linked to a known wallet
-- 🔗 **Unlinkability view** — demonstrates that a block explorer observer cannot connect your received payments
-- 🛡️ **ERC-6538 registry** — on-chain storage of your meta-address, human-readable handle
-- ⚡ **Smart account** — Kernel v3 smart account executes the sweep
-- 🌐 **Demo mode** — full UI with simulated sweep when bundler/Paymaster is unavailable
+ERC-5564 is the Ethereum standard for stealth addresses, and Scheme 1 (secp256k1 with view tags) is the deployed version. We use the canonical Announcer contract on Sepolia and ScopeLift's SDK for all elliptic-curve math — no hand-rolled cryptography. ERC-6538 is its companion registry, mapping a normal address to a published handle so senders can look you up.
 
----
+## Why EIP-7702 + ERC-4337?
 
-## ERC-5564 / ERC-6538 Stealth Address Design
+Here is the awkward part nobody warns you about: **a stealth address is a plain EOA with no ETH in it.** To move the money it must send a transaction, and to send a transaction it needs gas. Send it gas from your own wallet and you have just published the exact link you were trying to avoid.
 
-### Meta-address
-A stealth meta-address encodes two public keys:
-- **Spending public key** (`K_s`) — used to derive the one-time address
-- **Viewing public key** (`K_v`) — used to detect incoming payments without spending ability
+The obvious workaround — build a smart account owned by the stealth key — does not work either, because that account lives at a **different address** than the one holding the money.
 
-Format: `st:eth:0x<spending_pubkey><viewing_pubkey>` (ERC-5564 encoding — both keys are **compressed** 33-byte secp256k1 points)
+**EIP-7702 solves it properly.** The stealth EOA signs an authorization that gives it smart-account behaviour *at its own address*. The address that received the payment and the address sending the ERC-4337 UserOperation are then **the same address**. No migration, no extra hop, nothing to correlate.
 
-### Key Derivation (Sender)
-1. Generate ephemeral keypair `(e, E)` where `E = e·G`
-2. Compute shared secret `S = e·K_s` (ECDH with recipient's spending key)
-3. Hash it: `h = keccak256(abi.encode(S))`
-4. One-time stealth address: `P = h·G + K_s` (the address corresponding to this point)
-5. **View tag**: first byte of `keccak256(abi.encode(S))` — lets recipient cheaply pre-filter
+## Why the Paymaster?
 
-### Detection (Recipient)
-1. For each announcement, compute `S' = v·E` (ECDH with viewing key `v` and sender's ephemeral `E`)
-2. Hash it: `h' = keccak256(abi.encode(S'))`
-3. Check if view tag matches → if not, skip (256× cheaper scanning)
-4. If view tag matches, reconstruct the address and check if it matches the announced address
+So the stealth address can pay for its own sweep **without first receiving gas from your known wallet**. That is the entire job.
 
-### Spending (Recipient)
-Stealth private key: `p = h + s` where `s` is the spending private key  
-This is the private key that controls the one-time stealth address.
+**The Paymaster does not make anything anonymous.** It solves gas, and it *sees* every operation it sponsors. StealthTag also offers a **self-funded** mode where the stealth address pays gas from the ETH it already received — no Paymaster involved at all, which is in fact less correlated.
 
-### Contracts (Sepolia Testnet)
-| Contract | Address |
-|----------|---------|
-| ERC-5564 Announcer | `0x55649E01B5Df198D18D95b5cc5051630cfD45564` |
-| ERC-6538 Registry  | `0x6538E6bf4B0eBd30A8Ea093027Ac2422ce5d6538` |
+## Why the Relay?
 
-> Source: [ScopeLift stealth-address-erc-contracts](https://github.com/ScopeLift/stealth-address-erc-contracts)
+Without it your browser talks straight to the bundler and the RPC provider, which would see your **IP address** next to every stealth address you scan — and that set of addresses *is* the set of payments belonging to one viewing key.
+
+The relay is a small server-side proxy. Upstream providers see the relay, not you. It also keeps the API key out of the browser entirely.
+
+**The relay is not anonymity.** The relay operator sees exactly what the upstream used to see. Trust moves; it does not disappear. If you don't trust the operator, self-host it — it is one route and two environment variables.
 
 ---
 
-## ERC-4337 / Smart Account Architecture
+## Privacy Model
 
-| Component | Role in StealthTag |
-|-----------|-------------------|
-| **Smart Account** (Kernel v3) | The recipient's account that executes the sweep |
-| **UserOperation** | The sweep transaction, signed by the recipient's EOA |
-| **Bundler** (Pimlico) | Packages the UserOperation and submits it to EntryPoint |
-| **EntryPoint** | ERC-4337 singleton that validates and executes UserOps |
-| **Paymaster** (Pimlico Verifying) | Sponsors the sweep gas — critical for unlinkability |
+| Protected | Still Observable |
+|---|---|
+| Payment-to-payment unlinkability (from announcements alone) | **Amount** — X in, X out is a visible match |
+| Known-wallet → stealth-address funding link (there isn't one) | **Timing** — sweeping soon after a payment links them |
+| Direct IP exposure to the upstream bundler/RPC | **Destination** — where you sweep to is public |
+| A single public address that totals every payment | **Relay operator metadata** — your IP, scans, operations |
 
-The **Paymaster is what makes stealth sweeping private**: it pays gas on behalf of the UserOperation, so the stealth address never needs to receive ETH from a known wallet.
+Also public and permanent: your **ERC-6538 registration** links your real address to your handle, and every **announcement** shows the sender's wallet.
 
----
+**StealthTag does not provide anonymity or untraceability, and does not protect against timing, amount, or destination correlation.** The largest hole is the destination — sweep to your public wallet and you undo everything upstream of it. The app warns you when you try.
 
-## User Flow
-
-```
-RECIPIENT SETUP
-1. Connect wallet (EOA)
-2. Smart account created (Kernel v3)
-3. Generate stealth meta-address (spending key + viewing key)
-4. Register meta-address in ERC-6538 Registry
-5. Share your handle / meta-address
-
-SENDER FLOW
-1. Enter recipient's handle
-2. Resolve meta-address from ERC-6538 Registry
-3. Derive one-time stealth address via ECDH (ERC-5564)
-4. Send ETH to that one-time address
-5. Publish ephemeral pubkey + view tag to ERC-5564 Announcer
-
-RECIPIENT — SCAN + SWEEP
-1. Scanner watches ERC-5564 Announcer events
-2. Filter by view tag (256× speedup)
-3. Detect payments using viewing key
-4. Select detected payments to sweep
-5. Smart account executes sweep as UserOperation
-6. Paymaster sponsors gas → stealth address never linked to known wallet
-```
+Full actor-by-actor analysis: [`PRIVACY.md`](./PRIVACY.md). Key handling: [`SECURITY.md`](./SECURITY.md).
 
 ---
 
 ## Tech Stack
 
-| Layer | Technology |
-|-------|-----------|
-| Frontend | Next.js 15 (App Router), React 18, TypeScript |
-| Styling | Tailwind CSS, custom dark theme |
-| Wallet Connection | wagmi v2, viem v2 |
-| Stealth Addresses | `@scopelift/stealth-address-sdk` |
-| Smart Accounts | `permissionless` (Kernel v3 via ZeroDev) |
-| Bundler / Paymaster | Pimlico |
-| Chain | Ethereum Sepolia (chainId 11155111) |
+- **ERC-5564** — stealth addresses (Scheme 1, secp256k1 + view tags)
+- **ERC-6538** — handle registry
+- **EIP-7702** — the stealth EOA becomes its own smart account
+- **ERC-4337** — UserOperations via EntryPoint v0.8
+- **Pimlico** — bundler + verifying Paymaster
+- **TypeScript / Next.js** — app and relay
+- **Sepolia** — testnet only
 
 ---
 
-## Project Structure
+## Demo — what a judge should see
 
-```
-stealthtag/
-├── app/
-│   ├── layout.tsx              # Root layout with providers
-│   ├── page.tsx                # Landing / home page
-│   ├── setup/
-│   │   └── page.tsx            # Meta-address setup & registration
-│   ├── send/
-│   │   └── page.tsx            # Sender: pay a handle
-│   ├── scan/
-│   │   └── page.tsx            # Recipient: scan + sweep
-│   └── explore/
-│       └── page.tsx            # Unlinkability explorer view
-├── components/
-│   ├── layout/                 # Header, nav, footer
-│   ├── ui/                     # Reusable UI primitives
-│   └── stealth/                # Stealth-specific components
-├── lib/
-│   ├── stealth.ts              # ERC-5564 derivation & detection
-│   ├── registry.ts             # ERC-6538 registry interactions
-│   ├── announcer.ts            # ERC-5564 Announcer interactions
-│   ├── smartAccount.ts         # Smart account + UserOperation + Paymaster
-│   ├── chain.ts                # Chain config, contract addresses
-│   └── demo.ts                 # Demo mode seed data & simulation
-├── hooks/
-│   ├── useStealthKeys.ts       # Stealth key generation & storage
-│   ├── useScanner.ts           # Announcement scanning
-│   └── useSweep.ts             # Sponsored sweep logic
-├── types/
-│   └── index.ts                # Shared TypeScript types
-├── public/                     # Static assets
-├── .env.example
-├── README.md
-├── ARCHITECTURE.md
-├── DEMO.md
-└── PITCH.md
-```
+1. Open the app.
+2. **`/setup`** — connect a wallet, enter a passphrase, derive keys. A `st:eth:0x…` handle appears. Optionally register it on-chain via ERC-6538.
+3. **`/send`** — paste that handle and a **fresh stealth address** appears. Click *"Derive a different address"* — **it changes every time.** That is the core property, visible in one click.
+4. Send a small amount of Sepolia ETH, then publish the announcement.
+5. **`/scan`** — the payment is detected using only the viewing key.
+6. Enter a **destination address**. Note the app refuses to default this to your connected wallet, and warns you if you choose it anyway.
+7. Choose **sponsored** gas.
+8. **Sweep.**
+9. Open the sweep on [Sepolia Etherscan](https://sepolia.etherscan.io) and observe: a **type-4 (EIP-7702)** transaction submitted by **Pimlico's bundler**, with the **Paymaster** paying the gas — and **no transaction anywhere funding the stealth address from your wallet**.
+
+**Already verified live on Sepolia** — open these right now:
+
+| What | Where |
+|---|---|
+| Sponsored sweep (type 4, EntryPoint v0.8) | [`0x49005793…ae131`](https://sepolia.etherscan.io/tx/0x49005793174c338d139893f0d02169fa25edd19e695f82b963bf19d4fe8ae131) |
+| Stealth address (delegated, then drained) | [`0xA6F8F2A5…fEDf`](https://sepolia.etherscan.io/address/0xA6F8F2A5f6012d03e72F2E437D5a7058C477fEDf) |
+| Paymaster that paid the gas | `0x888888888888Ec68A58AB8094Cc1AD20Ba3D2402` |
 
 ---
 
-## Getting Started
+## Judge Quick Start
+
+### Requirements
+
+- **Node.js 20+** (developed on 24)
+- **MetaMask** or any injected wallet — WalletConnect is *optional*; the app works without it
+- A little **Sepolia ETH** for the sender side ([faucet](https://sepoliafaucet.com))
+- A **Pimlico API key** with Sepolia enabled, for sponsored sweeps
+
+### Install
 
 ```bash
-git clone <repository>
-cd stealthtag
+npm install --legacy-peer-deps
+```
 
-npm install
+> `--legacy-peer-deps` is required: `permissionless@0.4.0` declares a peer range for `ox` that conflicts with the version `viem@2.56` installs. The conflict is cosmetic.
 
+### Configure
+
+```bash
 cp .env.example .env.local
-# Fill in your API keys in .env.local
-
-npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000)
+Then edit `.env.local`:
 
----
-
-## Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `NEXT_PUBLIC_RPC_URL` | Yes | Sepolia RPC URL (Alchemy/Infura) |
-| `NEXT_PUBLIC_PIMLICO_API_KEY` | Yes* | Pimlico bundler+paymaster API key |
-| `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | Yes | WalletConnect Cloud project ID |
-| `NEXT_PUBLIC_CHAIN_ID` | No | Defaults to 11155111 (Sepolia) |
-| `NEXT_PUBLIC_DEMO_MODE` | No | Set `true` to simulate the sweep |
-
-*If `NEXT_PUBLIC_PIMLICO_API_KEY` is absent, the app automatically enters **Demo Mode**.
-
----
-
-## Smart Contracts
-
-### Reused (canonical ScopeLift deployments — Sepolia)
-| Contract | Address | Purpose |
-|----------|---------|---------|
-| ERC-5564 Announcer | `0x55649E01B5Df198D18D95b5cc5051630cfD45564` | Stores ephemeral pubkey + view tag for each payment |
-| ERC-6538 Registry | `0x6538E6bf4B0eBd30A8Ea093027Ac2422ce5d6538` | Maps addresses to stealth meta-addresses |
-
-No custom contracts are deployed — we reuse the canonical standard implementations.
-
----
-
-## Architecture Diagram
-
-```mermaid
-flowchart TD
-    subgraph Sender
-      S1[Sender App] -->|resolve handle| REG[ERC-6538 Registry]
-      S1 -->|ECDH derive one-time address| STA[One-time Stealth Address]
-      S1 -->|send funds| STA
-      S1 -->|publish ephemeral pubkey + view tag| ANN[ERC-5564 Announcer]
-    end
-    subgraph Recipient
-      ANN -->|events| SC[Scanner]
-      SC -->|filter by view tag, detect with viewing key| DET[Detected Payment]
-      DET --> SA[Recipient Smart Account]
-      SA -->|sweep| UO[UserOperation]
-      UO --> BND[Bundler / Pimlico]
-      BND --> EP[EntryPoint]
-      EP --> SA
-      PM[Paymaster / Pimlico] -.sponsors gas.-> UO
-    end
+```bash
+PIMLICO_API_KEY=your_key_here        # SERVER-SIDE ONLY — never NEXT_PUBLIC_
+RELAY_RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
 ```
 
----
+Everything else can stay at its default. Without `PIMLICO_API_KEY` the app runs in **demo mode** and labels sweeps as simulated — it will *not* silently fall back to calling Pimlico from your browser.
 
-## Account Abstraction Features
+### Run
 
-| Feature | Status | Purpose |
-|---------|--------|---------|
-| Sponsored sweep gas | ✅ Core | Keeps stealth addresses unlinkable |
-| Kernel v3 smart account | ✅ Core | Executes the sweep UserOperation |
-| Batched multi-sweep | 🔜 Nice-to-have | Sweep N stealth balances in 1 UserOp |
-| Passkey / social login | 🔜 Future | Gasless onboarding without EOA |
+```bash
+npm run build && npm start        # http://localhost:3000
+```
 
----
+### Test
 
-## Demo
+```bash
+npm test              # crypto, keys, relay security   (100 assertions)
+npm run test:ui       # real browser via Playwright     (73 assertions)
+npm run test:sweep    # end-to-end sweep on a forked chain — run `npm run anvil` first
+npm run verify:live   # preflight against live Pimlico — spends nothing
+```
 
-See [DEMO.md](./DEMO.md) for the full 2-minute script.
-
-**Quick summary:**
-1. Show your handle (meta-address)
-2. Send 3 payments from "Alice" — each lands at a distinct one-time address
-3. Challenge the room: "Here's my handle, find my total balance — you can't"
-4. Hit Sweep → Paymaster sponsors gas → funds collected, stealth addresses never linked
+`npm run verify:live -- --execute` runs the full sponsored sweep on Sepolia and **spends real testnet ETH**. Run the preflight first.
 
 ---
 
-## Future Improvements
+## Project Layout
 
-- **Batch sweeping** — multiple stealth addresses in one UserOperation
-- **ENS integration** — map `you.eth` to your stealth meta-address
-- **Private RPC relay** — prevent IP-level linkage of announcement queries
-- **Passkey onboarding** — sign into your smart account without a seed phrase
-- **Amount splitting** — break large amounts into multiple outputs to reduce amount correlation
-- **Multi-chain** — Base Sepolia, Arbitrum Sepolia support
+```
+lib/keys.ts           domain-separated HKDF key derivation
+lib/stealth.ts        ERC-5564 derivation + detection
+lib/announcer.ts      ERC-5564 Announcer
+lib/registry.ts       ERC-6538 registry
+lib/smartAccount.ts   EIP-7702 + ERC-4337 sponsored sweep
+lib/relay.ts          client transports (always via the relay)
+app/api/relay/        the relay itself — allowlisted JSON-RPC proxy
+app/setup|send|scan|explore    the four UI routes
+```
 
----
+## Status
 
-## Privacy & Correlation
+The cryptography, the funding architecture, and the sponsored sweep are **verified live on Sepolia**. The UI is verified by an automated browser suite. Broadcasting transactions *from the browser* needs a funded wallet, so that last mile is exercised manually — `npm run test:ui` prints exactly what it could and could not cover.
 
-StealthTag provides **unlinkability between payments**, not anonymity. The full
-actor-by-actor analysis is in [`PRIVACY.md`](./PRIVACY.md). In short:
-
-- **Stealth addresses (ERC-5564)** — unlinkability between payments.
-- **Paymaster (ERC-4337)** — gas sponsorship. **Not privacy.**
-- **Relay** — hides the user's IP from Pimlico and the RPC provider. **Not anonymity**; the relay operator sees what they used to.
-- **EIP-7702** — makes the stealth EOA itself the ERC-4337 sender, so no migration hop is needed. A plumbing fix with no privacy content.
-
-The stealth address never needs ETH from your known wallet: it either has its
-gas sponsored, or pays from the ETH it already received. The largest remaining
-risk is the **sweep destination** — sweeping to a publicly known address
-re-links everything, and no amount of sponsorship prevents that.
-
-## Security Considerations
-
-- Private keys (spending key, viewing key) are derived with domain-separated HKDF-SHA256 from **two** required inputs: a wallet signature *and* a user passphrase that never appears in the signed message. A signature harvested by a malicious site is not enough to reconstruct them. Full model and residual risks: [`SECURITY.md`](./SECURITY.md)
-- Only the **public** half of the key bundle reaches `localStorage`. The private keys are held in session memory and are gone on reload
-- The viewing key is separate from the spending key — you can share it for "view-only" audit without giving spending ability
-- Stealth addresses appear as random addresses on-chain; only the recipient can identify which ones belong to them
-- In production: use a private RPC relay for scanning to avoid IP-level correlation of announcement queries
-
----
-
-## Privacy Considerations
-
-### What StealthTag Provides
-- ✅ **Unlinkability of received payments** to the recipient's identity and to each other.
-- ✅ **Balance non-disclosure** — the recipient's total balance is not exposed through a single public address.
-
-### What StealthTag Does NOT Provide / What Remains Observable
-1. **Amounts are public.** Equal or round transfer amounts enable amount-correlation between a send and a stealth address.
-2. **ERC-6538 registration publicly links the user's EOA to their meta-address.** Anyone can see on-chain that EOA `0x...` registered a specific stealth meta-address. *Mitigation:* Register from an unlinked fresh address, or share the stealth meta-address off-registry (direct P2P / off-chain handle).
-3. **Announcements are public events.** Their existence, frequency, total count, and precise **timing** are visible on-chain to all network observers.
-4. **Network/RPC metadata (IP address).** RPC providers can correlate the recipient's IP address with specific announcement scanning queries or sweep submissions until a privacy relay is used.
-
-> **Honesty Note:** StealthTag is a prototype demonstrating unlinkable receiving and sponsored sweeping on Ethereum. It does not provide sender anonymity, amount confidentiality, or network-level anonymity.
-
----
-
-## Built During
-
-**ROAD TO DEVCON – IIITN EDITION**  
-Ethereum Research Workshop & Builders Lab  
-IIIT Nagpur × Bhaisaaab
+Testnet only. Not audited. Do not use with real funds.
