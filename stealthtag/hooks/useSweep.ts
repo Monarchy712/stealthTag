@@ -3,19 +3,34 @@
 /**
  * hooks/useSweep.ts
  * ------------------
- * Sponsored sweep hook — moves funds from detected stealth addresses
- * to the recipient's wallet via a Paymaster-sponsored UserOperation.
+ * Sweeps a detected stealth payment via an EIP-7702 + ERC-4337 UserOperation,
+ * gas sponsored by a Paymaster, submitted through the StealthTag relay.
  *
- * The Paymaster sponsoring gas is the critical privacy-preserving step:
- * it means the stealth address never needs to be funded with ETH from
- * a known wallet (which would link the two addresses).
+ * TWO SEPARATE PROPERTIES, NOT ONE
+ * --------------------------------
+ * 1. Paymaster sponsorship removes the INBOUND link. The stealth address never
+ *    has to receive gas money from the recipient's known wallet.
+ * 2. The relay removes the browser's IP from what Pimlico and the RPC provider
+ *    can see.
  *
- * In demo mode, the sweep is simulated and clearly marked.
+ * Neither is anonymity, and neither touches the OUTBOUND link: whatever
+ * address the user sweeps to is published on-chain next to the stealth
+ * address. That is why `sweep` takes an explicit destination and this hook
+ * never defaults it to the connected wallet.
+ *
+ * If the relay is not configured, the sweep is SIMULATED and labelled as such.
+ * It never silently falls back to a direct browser→Pimlico call, because that
+ * would hand Pimlico exactly the correlation the relay exists to remove.
  */
 
-import { useState, useCallback } from 'react';
-import { useAccount } from 'wagmi';
-import { sponsoredSweep, simulateSweep } from '@/lib/smartAccount';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  sponsoredSweep,
+  simulateSweep,
+  type GasMode,
+  type SweepResult,
+} from '@/lib/smartAccount';
+import { isRelayConfigured } from '@/lib/relay';
 import {
   generateDemoSweepHash,
   simulateBundlerDelay,
@@ -23,59 +38,93 @@ import {
 } from '@/lib/demo';
 import type { DetectedPayment, TxState } from '@/types';
 
+export type RelayStatus = 'checking' | 'ready' | 'unconfigured';
+
 interface UseSweepReturn {
   sweepState: TxState;
-  sweep: (payment: DetectedPayment, toAddress: `0x${string}`) => Promise<void>;
+  /** Sweep a payment to an EXPLICIT destination. No default — see above. */
+  sweep: (
+    payment: DetectedPayment,
+    toAddress: `0x${string}`,
+    gasMode?: GasMode,
+  ) => Promise<void>;
   resetSweep: () => void;
+  /** Last successful real sweep, for showing what actually happened on-chain. */
+  lastResult: SweepResult | null;
+  relayStatus: RelayStatus;
   isDemoMode: boolean;
 }
 
 export function useSweep(): UseSweepReturn {
-  const { address } = useAccount();
-  const demoMode = shouldUseDemoMode();
-
   const [sweepState, setSweepState] = useState<TxState>({ status: 'idle' });
+  const [lastResult, setLastResult] = useState<SweepResult | null>(null);
+  const forcedDemo = shouldUseDemoMode();
+  const [relayStatus, setRelayStatus] = useState<RelayStatus>(
+    forcedDemo ? 'unconfigured' : 'checking',
+  );
+
+  // The browser cannot see PIMLICO_API_KEY by design, so ask the relay whether
+  // sponsored sweeping is actually available.
+  useEffect(() => {
+    if (forcedDemo) return;
+    let cancelled = false;
+    isRelayConfigured('bundler')
+      .then((ok) => {
+        if (!cancelled) setRelayStatus(ok ? 'ready' : 'unconfigured');
+      })
+      .catch(() => {
+        if (!cancelled) setRelayStatus('unconfigured');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [forcedDemo]);
+
+  const demoMode = forcedDemo || relayStatus !== 'ready';
 
   const sweep = useCallback(
-    async (payment: DetectedPayment, toAddress: `0x${string}`) => {
-      setSweepState({ status: 'pending' });
-
-      try {
-        const rpcUrl = process.env.NEXT_PUBLIC_RPC_URL ?? 'https://rpc.sepolia.org';
-        const pimlicoKey = process.env.NEXT_PUBLIC_PIMLICO_API_KEY ?? '';
-
-        let txHash: `0x${string}`;
-
-        if (demoMode) {
-          // DEMO MODE: simulate the sweep, clearly marked
-          await simulateBundlerDelay();
-          txHash = generateDemoSweepHash(payment.stealthAddress);
-
-          setSweepState({
-            status: 'confirmed',
-            hash: txHash,
-            isSimulated: true,
-          });
-        } else {
-          // REAL MODE: sponsored sweep via Pimlico + Kernel smart account
-          setSweepState({ status: 'submitted' });
-
-          txHash = await sponsoredSweep(payment, toAddress, rpcUrl, pimlicoKey);
-
-          setSweepState({
-            status: 'confirmed',
-            hash: txHash,
-            isSimulated: false,
-          });
-        }
-      } catch (err: any) {
-        const message = err?.message ?? 'Unknown error';
+    async (
+      payment: DetectedPayment,
+      toAddress: `0x${string}`,
+      gasMode: GasMode = 'sponsored',
+    ) => {
+      if (!toAddress || !/^0x[0-9a-fA-F]{40}$/.test(toAddress)) {
         setSweepState({
           status: 'failed',
-          error: message.includes('DEMO_MODE')
-            ? 'Demo mode active — real sweep unavailable'
-            : `Sweep failed: ${message}`,
+          error: 'Enter a destination address before sweeping.',
         });
+        return;
+      }
+
+      setSweepState({ status: 'pending' });
+      setLastResult(null);
+
+      try {
+        if (demoMode) {
+          // DEMO: no transaction is submitted. Clearly labelled downstream.
+          await simulateBundlerDelay();
+          await simulateSweep(payment, toAddress);
+          setSweepState({
+            status: 'confirmed',
+            hash: generateDemoSweepHash(payment.stealthAddress),
+            isSimulated: true,
+          });
+          return;
+        }
+
+        // REAL: EIP-7702 UserOperation, sponsored, relayed.
+        setSweepState({ status: 'submitted' });
+        const result = await sponsoredSweep(payment, toAddress, gasMode);
+
+        setLastResult(result);
+        setSweepState({
+          status: 'confirmed',
+          hash: result.transactionHash,
+          isSimulated: false,
+        });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Unknown error';
+        setSweepState({ status: 'failed', error: `Sweep failed: ${message}` });
       }
     },
     [demoMode],
@@ -83,7 +132,8 @@ export function useSweep(): UseSweepReturn {
 
   const resetSweep = useCallback(() => {
     setSweepState({ status: 'idle' });
+    setLastResult(null);
   }, []);
 
-  return { sweepState, sweep, resetSweep, isDemoMode: demoMode };
+  return { sweepState, sweep, resetSweep, lastResult, relayStatus, isDemoMode: demoMode };
 }

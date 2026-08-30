@@ -4,19 +4,21 @@
 
 /** A stealth meta-address (the "handle" you publish publicly).
  *  Encodes both the spending public key and the viewing public key.
- *  Format: st:eth:0x<65-byte-spending-pubkey><65-byte-viewing-pubkey>
+ *  Format: st:eth:0x<33-byte-spending-pubkey><33-byte-viewing-pubkey>
+ *  (ERC-5564 Scheme 1 uses COMPRESSED secp256k1 public keys.)
  */
 export interface StealthMetaAddress {
   /** The full ERC-5564 encoded meta-address string */
   metaAddress: string;
-  /** Spending public key (hex, uncompressed 04...) */
+  /** Spending public key (hex, COMPRESSED 33 bytes: 02.../03...) */
   spendingPublicKey: `0x${string}`;
-  /** Viewing public key (hex, uncompressed 04...) */
+  /** Viewing public key (hex, COMPRESSED 33 bytes: 02.../03...) */
   viewingPublicKey: `0x${string}`;
 }
 
 /** The local key bundle stored by the recipient.
- *  The spending key and viewing key are derived from a wallet signature.
+ *  The spending key and viewing key are derived via domain-separated HKDF
+ *  from a master seed (wallet signature + user passphrase). See lib/keys.ts.
  *  NEVER expose these to the network.
  */
 export interface StealthKeyBundle {
@@ -32,6 +34,10 @@ export interface StealthKeyBundle {
   metaAddress: string;
   /** The EOA address these keys were derived for */
   ownerAddress: `0x${string}`;
+  /** Chain the keys were bound to during derivation (KDF domain separation) */
+  chainId?: number;
+  /** Account index within the master seed (KDF domain separation) */
+  accountIndex?: number;
 }
 
 /** A stealth address derived for a single payment (sender side) */
@@ -52,7 +58,7 @@ export interface AnnouncementEvent {
   stealthAddress: `0x${string}`;
   /** Ephemeral public key published by sender */
   ephemeralPubKey: `0x${string}`;
-  /** Metadata field (view tag is first byte) */
+  /** ERC-5564 metadata field — the view tag is byte 0 */
   metadata: `0x${string}`;
   /** Block number of the announcement */
   blockNumber: bigint;

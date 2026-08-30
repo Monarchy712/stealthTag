@@ -79,7 +79,7 @@ A stealth meta-address encodes two public keys:
 - **Spending public key** (`K_s`) — used to derive the one-time address
 - **Viewing public key** (`K_v`) — used to detect incoming payments without spending ability
 
-Format: `st:eth:0x<spending_pubkey><viewing_pubkey>` (ERC-5564 encoding)
+Format: `st:eth:0x<spending_pubkey><viewing_pubkey>` (ERC-5564 encoding — both keys are **compressed** 33-byte secp256k1 points)
 
 ### Key Derivation (Sender)
 1. Generate ephemeral keypair `(e, E)` where `E = e·G`
@@ -308,9 +308,25 @@ See [DEMO.md](./DEMO.md) for the full 2-minute script.
 
 ---
 
+## Privacy & Correlation
+
+StealthTag provides **unlinkability between payments**, not anonymity. The full
+actor-by-actor analysis is in [`PRIVACY.md`](./PRIVACY.md). In short:
+
+- **Stealth addresses (ERC-5564)** — unlinkability between payments.
+- **Paymaster (ERC-4337)** — gas sponsorship. **Not privacy.**
+- **Relay** — hides the user's IP from Pimlico and the RPC provider. **Not anonymity**; the relay operator sees what they used to.
+- **EIP-7702** — makes the stealth EOA itself the ERC-4337 sender, so no migration hop is needed. A plumbing fix with no privacy content.
+
+The stealth address never needs ETH from your known wallet: it either has its
+gas sponsored, or pays from the ETH it already received. The largest remaining
+risk is the **sweep destination** — sweeping to a publicly known address
+re-links everything, and no amount of sponsorship prevents that.
+
 ## Security Considerations
 
-- Private keys (spending key, viewing key) are derived from a wallet signature and stored only in memory / localStorage — never transmitted
+- Private keys (spending key, viewing key) are derived with domain-separated HKDF-SHA256 from **two** required inputs: a wallet signature *and* a user passphrase that never appears in the signed message. A signature harvested by a malicious site is not enough to reconstruct them. Full model and residual risks: [`SECURITY.md`](./SECURITY.md)
+- Only the **public** half of the key bundle reaches `localStorage`. The private keys are held in session memory and are gone on reload
 - The viewing key is separate from the spending key — you can share it for "view-only" audit without giving spending ability
 - Stealth addresses appear as random addresses on-chain; only the recipient can identify which ones belong to them
 - In production: use a private RPC relay for scanning to avoid IP-level correlation of announcement queries

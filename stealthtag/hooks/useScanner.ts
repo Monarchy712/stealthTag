@@ -11,10 +11,21 @@
  *   2. For each announcement, check view tag (fast 1-byte check)
  *   3. If view tag matches, run full ECDH detection with viewing key
  *   4. Return detected payments with computed stealth private keys
+ *
+ * PRIVACY NOTE
+ * ------------
+ * Scanning is a correlation channel in its own right: the set of addresses a
+ * client asks for balances on IS the set of payments belonging to one viewing
+ * key. Every read here therefore goes through the relay (lib/relay.ts) rather
+ * than a public RPC endpoint reached directly from the browser, so the RPC
+ * provider sees the relay rather than the recipient. The relay operator still
+ * sees it — this is a boundary, not anonymity.
  */
 
-import { useState, useCallback } from 'react';
-import { usePublicClient } from 'wagmi';
+import { useState, useCallback, useMemo } from 'react';
+import { createPublicClient } from 'viem';
+import { sepolia } from 'viem/chains';
+import { relayRpcTransport } from '@/lib/relay';
 import { fetchAnnouncements } from '@/lib/announcer';
 import { scanAnnouncements } from '@/lib/stealth';
 import { getDemoAnnouncements, shouldUseDemoMode } from '@/lib/demo';
@@ -30,7 +41,11 @@ interface UseScannerReturn {
 }
 
 export function useScanner(): UseScannerReturn {
-  const publicClient = usePublicClient();
+  // Relay-backed client: never a direct browser→RPC-provider connection.
+  const publicClient = useMemo(
+    () => createPublicClient({ chain: sepolia, transport: relayRpcTransport() }),
+    [],
+  );
   const [detectedPayments, setDetectedPayments] = useState<DetectedPayment[]>([]);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -52,9 +67,9 @@ export function useScanner(): UseScannerReturn {
           announcements = getDemoAnnouncements();
         } else {
           // Real mode: fetch from Announcer contract
-          const latestBlock = await (publicClient as any).getBlockNumber();
+          const latestBlock = await publicClient.getBlockNumber();
           const scanFrom = fromBlock ?? (latestBlock > 5000n ? latestBlock - 5000n : 0n);
-          announcements = await fetchAnnouncements(scanFrom, 'latest');
+          announcements = await fetchAnnouncements(scanFrom, 'latest', publicClient);
         }
 
         if (demoMode) {
@@ -79,7 +94,7 @@ export function useScanner(): UseScannerReturn {
           const withBalances = await Promise.all(
             detected.map(async (payment) => {
               try {
-                const balance = await (publicClient as any).getBalance({
+                const balance = await publicClient.getBalance({
                   address: payment.stealthAddress,
                 });
                 return { ...payment, balance };
@@ -91,8 +106,9 @@ export function useScanner(): UseScannerReturn {
 
           setDetectedPayments(withBalances);
         }
-      } catch (err: any) {
-        setError(`Scanning failed: ${err?.message ?? 'Unknown error'}`);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Unknown error';
+        setError(`Scanning failed: ${message}`);
       } finally {
         setScanning(false);
       }

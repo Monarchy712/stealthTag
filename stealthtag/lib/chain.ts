@@ -103,23 +103,31 @@ export const CHAIN_ID = 11155111;
 // ===========================================================
 // Public Client
 // ===========================================================
+// All recipient-side reads go through the relay (see lib/relay.ts) so the RPC
+// provider does not learn which stealth addresses one viewing key queries.
+// `rpcUrl` is accepted for scripts and server-side use.
+
 export function createSepoliaClient(rpcUrl?: string) {
   return createPublicClient({
     chain: sepolia,
-    transport: http(rpcUrl ?? process.env.NEXT_PUBLIC_RPC_URL ?? 'https://rpc.sepolia.org'),
+    transport: rpcUrl
+      ? http(rpcUrl)
+      : http(process.env.NEXT_PUBLIC_RPC_URL ?? 'https://rpc.sepolia.org'),
   });
 }
 
 // ===========================================================
-// Pimlico URLs
+// Bundler / Paymaster
 // ===========================================================
-export function getPimlicoUrl(apiKey: string) {
-  return `https://api.pimlico.io/v2/sepolia/rpc?apikey=${apiKey}`;
-}
-
-export function getPimlicoPaymasterUrl(apiKey: string) {
-  return `https://api.pimlico.io/v2/sepolia/rpc?apikey=${apiKey}`;
-}
+// There is deliberately NO browser-side Pimlico URL helper any more.
+//
+// The previous `getPimlicoUrl(apiKey)` was called from the browser with
+// NEXT_PUBLIC_PIMLICO_API_KEY, which (a) shipped the API key to every visitor
+// and (b) let Pimlico see the user's IP alongside the stealth address, the
+// destination and the amount. Both are handled by the relay now: the key lives
+// in the server-only PIMLICO_API_KEY, and the browser talks to /api/relay.
+//
+// The upstream URL is constructed in app/api/relay/[target]/route.ts.
 
 // ===========================================================
 // Block explorer
@@ -137,10 +145,13 @@ export function addressUrl(address: string) {
 // ===========================================================
 // Demo mode
 // ===========================================================
+/**
+ * Explicit demo-mode flag only.
+ *
+ * Whether real sweeping is possible is now a question the browser cannot
+ * answer locally — the API key is server-side by design. Callers must ask the
+ * relay via `isRelayConfigured()` (lib/relay.ts) instead of inspecting env.
+ */
 export function isDemoMode(): boolean {
-  return (
-    process.env.NEXT_PUBLIC_DEMO_MODE === 'true' ||
-    !process.env.NEXT_PUBLIC_PIMLICO_API_KEY ||
-    process.env.NEXT_PUBLIC_PIMLICO_API_KEY === 'YOUR_PIMLICO_API_KEY'
-  );
+  return process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
 }

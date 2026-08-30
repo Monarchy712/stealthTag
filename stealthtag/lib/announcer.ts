@@ -43,7 +43,7 @@ export async function publishAnnouncement(
 ): Promise<`0x${string}`> {
   if (!walletClient.account) throw new Error('Wallet not connected');
 
-  // Metadata format for scheme 1: 0x01<viewTag>
+  // ERC-5564 metadata: byte 0 is the view tag
   const metadata = encodeAnnouncerMetadata(viewTag);
 
   const hash = await walletClient.writeContract({

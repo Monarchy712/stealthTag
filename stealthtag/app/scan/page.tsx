@@ -16,7 +16,6 @@ import { useAccount } from 'wagmi';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { formatEther } from 'viem';
 import {
-  AlertTriangle,
   ArrowRight,
   CheckCircle2,
   ExternalLink,
@@ -41,13 +40,28 @@ import { useStealthKeys } from '@/hooks/useStealthKeys';
 import { useScanner } from '@/hooks/useScanner';
 import { useSweep } from '@/hooks/useSweep';
 import type { DetectedPayment } from '@/types';
-import { txUrl } from '@/lib/chain';
+import type { GasMode } from '@/lib/smartAccount';
 
 export default function ScanPage() {
   const { address, isConnected } = useAccount();
   const { keyBundle, keyState } = useStealthKeys();
   const { detectedPayments, scanning, error: scanError, scan, isDemoMode } = useScanner();
-  const { sweepState, sweep, resetSweep, isDemoMode: sweepDemoMode } = useSweep();
+  const {
+    sweepState,
+    sweep,
+    resetSweep,
+    lastResult,
+    relayStatus,
+    isDemoMode: sweepDemoMode,
+  } = useSweep();
+
+  // Deliberately NOT defaulted to the connected wallet: the destination is the
+  // single largest on-chain correlation risk, so the user must choose it.
+  const [destination, setDestination] = useState('');
+
+  // Sponsored vs self-funded gas is a genuine privacy tradeoff, so it is the
+  // user's choice rather than a hidden default. See PRIVACY.md §3.
+  const [gasMode, setGasMode] = useState<GasMode>('sponsored');
 
   const [sweepingIdx, setSweepingIdx] = useState<number | null>(null);
   const [swept, setSwept] = useState<Record<string, string>>({}); // addr → txHash
@@ -65,17 +79,22 @@ export default function ScanPage() {
   }
 
   if (keyState !== 'generated' || !keyBundle) {
+    const locked = keyState === 'locked';
     return (
       <PageShell>
         <div className="text-center py-24">
           <Key className="w-12 h-12 text-gray-600 mx-auto mb-4" />
-          <h2 className="text-xl font-bold text-white mb-2">No stealth keys found</h2>
+          <h2 className="text-xl font-bold text-white mb-2">
+            {locked ? 'Stealth keys locked' : 'No stealth keys found'}
+          </h2>
           <p className="text-gray-400 text-sm mb-6 max-w-sm mx-auto">
-            You need to generate your stealth keys before you can scan for payments.
+            {locked
+              ? 'Your viewing key is never stored on disk. Re-derive it with your wallet signature and passphrase to scan for payments.'
+              : 'You need to derive your stealth keys before you can scan for payments.'}
           </p>
           <Link href="/setup">
             <Button>
-              Go to Setup
+              {locked ? 'Unlock keys' : 'Go to Setup'}
               <ArrowRight className="w-4 h-4" />
             </Button>
           </Link>
@@ -89,11 +108,15 @@ export default function ScanPage() {
     await scan(keyBundle);
   }
 
+  const destinationIsValid = /^0x[0-9a-fA-F]{40}$/.test(destination.trim());
+  const destinationIsKnownWallet =
+    destinationIsValid && destination.trim().toLowerCase() === address?.toLowerCase();
+
   async function handleSweep(payment: DetectedPayment, idx: number) {
-    if (!address) return;
+    if (!destinationIsValid) return;
     setSweepingIdx(idx);
     resetSweep();
-    await sweep(payment, address);
+    await sweep(payment, destination.trim() as `0x${string}`, gasMode);
     if (sweepState.status === 'confirmed' || sweepDemoMode) {
       setSwept((prev) => ({ ...prev, [payment.stealthAddress]: 'done' }));
     }
@@ -105,33 +128,51 @@ export default function ScanPage() {
       <SectionHeading
         badge="ERC-5564 Scanner + ERC-4337 Sweep"
         title="Scan & Sweep"
-        subtitle="Detect incoming payments to your stealth addresses and sweep them to your wallet — gas sponsored by Paymaster."
+        subtitle="Detect incoming payments to your stealth addresses and sweep them to a destination you choose — gas sponsored by a Paymaster, submitted through the relay."
       />
 
       {/* Demo mode banner */}
       {isDemoMode && (
         <AlertBox type="demo" title="🎭 Demo Mode">
-          No Pimlico API key detected. The scanner shows pre-seeded demo payments
-          and the sweep is <strong>simulated</strong> — clearly marked. Add your
-          NEXT_PUBLIC_PIMLICO_API_KEY to enable real on-chain sweeps.
+          {relayStatus === 'unconfigured'
+            ? 'The relay is not configured (no server-side PIMLICO_API_KEY / RELAY_RPC_URL), so the sweep is '
+            : 'Demo mode is forced by NEXT_PUBLIC_DEMO_MODE, so the sweep is '}
+          <strong>simulated</strong> — clearly marked, no transaction is submitted.
+          StealthTag deliberately does <em>not</em> fall back to calling Pimlico
+          directly from your browser: that would show the bundler your IP next to
+          the stealth address, which is exactly what the relay exists to prevent.
         </AlertBox>
       )}
 
-      {/* AA explanation */}
+      {/* What sponsorship does and does not do */}
       <Card className="mt-4 bg-indigo-950/20 border-indigo-800/30">
         <div className="flex items-start gap-3">
           <Zap className="w-5 h-5 text-indigo-400 flex-shrink-0 mt-0.5" />
-          <div>
-            <p className="text-sm font-semibold text-white mb-1">
-              Why is gas sponsored?
+          <div className="space-y-2">
+            <p className="text-sm font-semibold text-white">
+              Three separate things — only one of them is privacy
             </p>
-            <p className="text-xs text-gray-400 leading-relaxed">
-              Sweeping from a stealth address requires gas <em>at that address</em>.
-              Funding it from your main wallet links the two addresses — destroying
-              privacy. The <strong className="text-indigo-400">Paymaster sponsors the gas</strong> so
-              the stealth address is never funded from a known wallet.
-              This is a sponsored transaction, not a "free" one — Ethereum still
-              consumes gas; the Paymaster covers the cost on your behalf.
+            <ul className="text-xs text-gray-400 leading-relaxed space-y-1.5">
+              <li>
+                <strong className="text-indigo-300">Stealth addresses (ERC-5564)</strong> give
+                unlinkability <em>between payments</em>. Each payment lands at a fresh address.
+              </li>
+              <li>
+                <strong className="text-indigo-300">Paymaster sponsorship</strong> solves{' '}
+                <em>gas</em>, nothing more. Your stealth address is an EOA with no ETH for fees;
+                funding it from your main wallet would publish the link. EIP-7702 lets the stealth
+                address itself execute a sponsored UserOperation, so it never needs that transfer.
+              </li>
+              <li>
+                <strong className="text-indigo-300">The relay</strong> reduces <em>network</em>{' '}
+                correlation: Pimlico and the RPC provider see the relay server, not your IP. The
+                relay operator still sees it. This is a trust boundary, not anonymity.
+              </li>
+            </ul>
+            <p className="text-xs text-amber-400/90 leading-relaxed pt-1">
+              None of this hides the sweep itself. Whatever address you sweep to is published
+              on-chain right next to the stealth address, and the amounts match. Sweeping to
+              your public wallet re-links everything.
             </p>
           </div>
         </div>
@@ -179,11 +220,100 @@ export default function ScanPage() {
         )}
       </Card>
 
+      {/* Sweep destination — explicit, never defaulted */}
+      {detectedPayments.length > 0 && (
+        <Card className="mt-4">
+          <div className="flex items-center gap-3 mb-3">
+            <StepNumber n={2} />
+            <div>
+              <h3 className="font-bold text-white">Choose a sweep destination</h3>
+              <p className="text-xs text-gray-500 mt-0.5">
+                This address is published on-chain next to the stealth address
+              </p>
+            </div>
+          </div>
+
+          <label htmlFor="sweep-destination" className="block text-xs text-gray-500 mb-1">
+            Destination address
+          </label>
+          <input
+            id="sweep-destination"
+            type="text"
+            spellCheck={false}
+            value={destination}
+            onChange={(e) => setDestination(e.target.value)}
+            placeholder="0x… (an address not publicly tied to you)"
+            className="w-full bg-gray-950 border border-gray-800 rounded-xl px-3 py-2 text-sm
+                       text-gray-200 font-mono placeholder:text-gray-700 focus:outline-none
+                       focus:border-indigo-600"
+          />
+
+          {destination.length > 0 && !destinationIsValid && (
+            <p className="text-xs text-red-400 mt-1.5">Not a valid 20-byte address.</p>
+          )}
+
+          {destinationIsKnownWallet && (
+            <AlertBox type="warning" title="This is your connected wallet">
+              Sweeping here publishes <span className="font-mono">stealthAddress → yourWallet</span>{' '}
+              on-chain, and the amounts will match. Anyone reading the chain can then link this
+              payment — and, via your ERC-6538 registration, your published handle — to your public
+              wallet. Gas sponsorship does not prevent this. Use a destination that is not already
+              associated with your identity.
+            </AlertBox>
+          )}
+
+          {address && (
+            <button
+              onClick={() => setDestination(address)}
+              className="mt-2 text-xs text-gray-600 hover:text-gray-400 underline"
+            >
+              Use my connected wallet anyway (not recommended)
+            </button>
+          )}
+
+          <Divider label="Who pays the gas" />
+
+          <div className="grid sm:grid-cols-2 gap-2">
+            {(
+              [
+                {
+                  mode: 'sponsored' as GasMode,
+                  title: 'Paymaster sponsored',
+                  body: 'Sweeps 100%, works for dust and ERC-20s. The Paymaster address appears on-chain in every sponsored sweep, and the sponsor sees this operation.',
+                },
+                {
+                  mode: 'self-funded' as GasMode,
+                  title: 'Self-funded from the payment',
+                  body: 'The stealth address pays its own gas from the ETH it received. No Paymaster is involved, so one observer disappears. Leaves a small residue and needs the payment to exceed gas.',
+                },
+              ]
+            ).map((opt) => (
+              <button
+                key={opt.mode}
+                onClick={() => setGasMode(opt.mode)}
+                className={`text-left rounded-xl p-3 border transition-colors ${
+                  gasMode === opt.mode
+                    ? 'border-indigo-600 bg-indigo-950/30'
+                    : 'border-gray-800 bg-gray-950 hover:border-gray-700'
+                }`}
+              >
+                <p className="text-xs font-semibold text-white mb-1">{opt.title}</p>
+                <p className="text-[11px] text-gray-500 leading-relaxed">{opt.body}</p>
+              </button>
+            ))}
+          </div>
+
+          <p className="text-[11px] text-gray-600 mt-2">
+            Neither option is anonymity. Both leave the sweep itself public on-chain.
+          </p>
+        </Card>
+      )}
+
       {/* Detected payments */}
       {detectedPayments.length > 0 && (
         <div className="mt-4">
           <div className="flex items-center gap-3 mb-3">
-            <StepNumber n={2} />
+            <StepNumber n={3} />
             <h3 className="font-bold text-white">
               Detected payments{' '}
               <span className="text-indigo-400">({detectedPayments.length})</span>
@@ -201,7 +331,9 @@ export default function ScanPage() {
                 isSweeping={sweepingIdx === idx}
                 sweepState={sweepingIdx === idx ? sweepState : { status: 'idle' }}
                 onSweep={() => handleSweep(payment, idx)}
-                recipientAddress={address!}
+                destination={destination.trim()}
+                canSweep={destinationIsValid}
+                lastResult={sweepingIdx === idx ? lastResult : null}
               />
             ))}
           </div>
@@ -220,7 +352,9 @@ function DetectedPaymentCard({
   isSweeping,
   sweepState,
   onSweep,
-  recipientAddress,
+  destination,
+  canSweep,
+  lastResult,
 }: {
   payment: DetectedPayment;
   idx: number;
@@ -229,7 +363,9 @@ function DetectedPaymentCard({
   isSweeping: boolean;
   sweepState: ReturnType<typeof useSweep>['sweepState'];
   onSweep: () => void;
-  recipientAddress: string;
+  destination: string;
+  canSweep: boolean;
+  lastResult: ReturnType<typeof useSweep>['lastResult'];
 }) {
   const balance = payment.balance ?? 0n;
   const balanceEth = parseFloat(formatEther(balance)).toFixed(6);
@@ -287,7 +423,8 @@ function DetectedPaymentCard({
             <Button
               onClick={onSweep}
               loading={isSweeping}
-              disabled={isSweeping || isSwept}
+              disabled={isSweeping || isSwept || !canSweep}
+              title={canSweep ? undefined : 'Enter a destination address first'}
               size="sm"
             >
               <Zap className="w-3.5 h-3.5" />
@@ -302,24 +439,38 @@ function DetectedPaymentCard({
           <TxStatusBadge state={sweepState} />
           {sweepState.status === 'pending' && (
             <p className="text-xs text-gray-500 mt-1">
-              Building UserOperation → requesting Paymaster sponsorship…
+              Building EIP-7702 UserOperation → requesting Paymaster sponsorship via the relay…
             </p>
           )}
           {sweepState.status === 'submitted' && (
             <p className="text-xs text-gray-500 mt-1">
-              Submitted to Pimlico bundler → waiting for EntryPoint confirmation…
+              Signed locally with the stealth key → relayed to the bundler → waiting for
+              EntryPoint v0.8 inclusion…
             </p>
           )}
           {sweepState.status === 'confirmed' && sweepState.isSimulated && (
             <p className="text-xs text-orange-400 mt-1">
-              [DEMO] This sweep was simulated. In live mode, the Paymaster sponsors real gas
-              so this stealth address is never funded from your known wallet.
+              [DEMO] Simulated — nothing was submitted. In live mode the stealth address itself
+              sends a sponsored UserOperation, so it never needs gas from your known wallet.
             </p>
           )}
           {sweepState.status === 'confirmed' && !sweepState.isSimulated && (
-            <p className="text-xs text-emerald-400 mt-1">
-              ✓ Gas sponsored by Paymaster — stealth address was never linked to your wallet.
-            </p>
+            <div className="text-xs mt-1 space-y-1">
+              <p className="text-emerald-400">
+                ✓ Swept. Gas was paid by the Paymaster — this stealth address was never funded
+                from your wallet.
+              </p>
+              {lastResult && (
+                <p className="text-gray-500 font-mono break-all">
+                  {lastResult.from} → {lastResult.to}
+                </p>
+              )}
+              <p className="text-amber-400/90">
+                Now public on-chain: this stealth address paid{' '}
+                <span className="font-mono">{destination.slice(0, 10)}…</span>. That link is
+                permanent and sponsorship does not hide it.
+              </p>
+            </div>
           )}
         </div>
       )}

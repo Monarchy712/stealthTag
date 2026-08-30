@@ -17,11 +17,19 @@ import {
   generateStealthAddress,
   checkStealthAddress,
   computeStealthKey,
-  parseStealthMetaAddressURI,
+  generateStealthMetaAddressFromKeys,
+  getViewTagFromMetadata,
+  isValidPublicKey,
   VALID_SCHEME_ID,
 } from '@scopelift/stealth-address-sdk';
 import { privateKeyToAccount } from 'viem/accounts';
-import { keccak256, encodePacked, hexToBytes, toHex } from 'viem';
+import {
+  buildKeyDerivationMessage,
+  deriveMasterSeed,
+  deriveStealthKeyBundle,
+  generateRandomMasterSeed,
+  KDF_VERSION,
+} from './keys';
 import type {
   StealthKeyBundle,
   StealthMetaAddress,
@@ -31,110 +39,90 @@ import type {
 } from '@/types';
 
 // ===========================================================
-// Key derivation from wallet signature
+// Key derivation
 // ===========================================================
-// We derive deterministic spending and viewing keys by signing
-// a domain-specific message with the user's EOA wallet.
-// This means the user never needs to separately back up stealth keys —
-// they can always regenerate them by signing with their wallet.
+// Key derivation lives in lib/keys.ts: domain-separated HKDF-SHA256 over a
+// master seed built from a wallet signature AND a user-held passphrase.
+//
+// It replaced the previous scheme, in which each private key was
+// keccak256(signature over a public constant string). Under that scheme a
+// signature over a publicly known fixed message was, by itself, enough to
+// reconstruct both stealth private keys. It is gone; do not reintroduce it.
+//
+// Re-exported here so callers keep a single stealth-facing entry point.
 
-const SPENDING_KEY_MESSAGE = 'StealthTag: Generate Stealth Spending Key v1';
-const VIEWING_KEY_MESSAGE = 'StealthTag: Generate Stealth Viewing Key v1';
-
-/**
- * Derive a private key from a wallet signature.
- * The signature is hashed to produce a 32-byte private key.
- * This is deterministic: same wallet + same message → same key.
- */
-function deriveKeyFromSignature(signature: `0x${string}`): `0x${string}` {
-  return keccak256(encodePacked(['bytes'], [signature]));
-}
-
-/**
- * Generate the full stealth key bundle for a recipient.
- *
- * Requires two signatures from the user's wallet (one for spending key,
- * one for viewing key). The user signs well-known messages — no funds at risk.
- *
- * @param ownerAddress - The EOA address of the recipient
- * @param spendingSignature - Signature over SPENDING_KEY_MESSAGE
- * @param viewingSignature  - Signature over VIEWING_KEY_MESSAGE
- */
-export function generateStealthKeyBundle(
-  ownerAddress: `0x${string}`,
-  spendingSignature: `0x${string}`,
-  viewingSignature: `0x${string}`,
-): StealthKeyBundle {
-  const spendingPrivateKey = deriveKeyFromSignature(spendingSignature);
-  const viewingPrivateKey = deriveKeyFromSignature(viewingSignature);
-
-  const spendingAccount = privateKeyToAccount(spendingPrivateKey);
-  const viewingAccount = privateKeyToAccount(viewingPrivateKey);
-
-  const spendingPublicKey = spendingAccount.publicKey;
-  const viewingPublicKey = viewingAccount.publicKey;
-
-  // ERC-5564 meta-address format: spending pubkey + viewing pubkey
-  // The SDK encodes this as: st:eth:0x<spendingPubKey><viewingPubKey>
-  const metaAddress = encodeMetaAddress(spendingPublicKey, viewingPublicKey);
-
-  return {
-    spendingPrivateKey,
-    spendingPublicKey,
-    viewingPrivateKey,
-    viewingPublicKey,
-    metaAddress,
-    ownerAddress,
-  };
-}
-
-/**
- * The messages the user needs to sign (export for use in UI).
- */
-export const STEALTH_KEY_MESSAGES = {
-  spending: SPENDING_KEY_MESSAGE,
-  viewing: VIEWING_KEY_MESSAGE,
-} as const;
+export {
+  buildKeyDerivationMessage,
+  deriveMasterSeed,
+  deriveStealthKeyBundle,
+  generateRandomMasterSeed,
+  KDF_VERSION,
+};
 
 // ===========================================================
 // Meta-address encoding/decoding
 // ===========================================================
 
+/** Hex length of one COMPRESSED secp256k1 public key (33 bytes). */
+const COMPRESSED_PUBKEY_HEX_LEN = 66;
+
 /**
  * Encode spending and viewing public keys into an ERC-5564 meta-address string.
  * Format: st:eth:0x<spendingPubKey><viewingPubKey>
- * Both keys are uncompressed 65-byte secp256k1 public keys (04...).
+ *
+ * Both keys MUST be COMPRESSED 33-byte secp256k1 public keys (0x02.../0x03...).
+ * ERC-5564 Scheme 1 — and the ScopeLift SDK's `validateStealthMetaAddress`,
+ * which only accepts a 66- or 132-hex-character payload — require this.
+ * viem's `privateKeyToAccount().publicKey` is UNCOMPRESSED and must be
+ * converted first (see `compressedPublicKey` in lib/keys.ts).
  */
 export function encodeMetaAddress(
   spendingPublicKey: `0x${string}`,
   viewingPublicKey: `0x${string}`,
 ): string {
-  const spendingHex = spendingPublicKey.replace('0x', '');
-  const viewingHex = viewingPublicKey.replace('0x', '');
-  return `st:eth:0x${spendingHex}${viewingHex}`;
+  for (const [label, key] of [
+    ['spending', spendingPublicKey],
+    ['viewing', viewingPublicKey],
+  ] as const) {
+    if (key.length !== COMPRESSED_PUBKEY_HEX_LEN + 2) {
+      throw new Error(
+        `Invalid ${label} public key: expected a compressed 33-byte key ` +
+          `(${COMPRESSED_PUBKEY_HEX_LEN + 2} hex chars incl. 0x), got ${key.length}`,
+      );
+    }
+    if (!isValidPublicKey(key)) {
+      throw new Error(`Invalid ${label} public key: not a point on secp256k1`);
+    }
+  }
+
+  // Let the SDK do the concatenation so the on-chain bytes stay canonical.
+  return `st:eth:${generateStealthMetaAddressFromKeys({ spendingPublicKey, viewingPublicKey })}`;
 }
 
 /**
  * Parse a meta-address string back into its component public keys.
- * Accepts both the full "st:eth:0x..." format and bare "0x..." hex.
+ * Accepts the full "st:eth:0x..." format and bare "0x..." hex.
  */
 export function parseMetaAddress(metaAddress: string): StealthMetaAddress {
   let hex = metaAddress;
   if (hex.startsWith('st:eth:')) {
-    hex = hex.replace('st:eth:', '');
+    hex = hex.slice('st:eth:'.length);
   }
-  if (!hex.startsWith('0x')) {
-    hex = `0x${hex}`;
+  const keysHex = hex.startsWith('0x') ? hex.slice(2) : hex;
+
+  // Two compressed keys = 132 hex chars. ERC-5564 also permits a single key
+  // reused for both roles (66 chars); the SDK accepts that, so we do too.
+  if (keysHex.length !== 132 && keysHex.length !== COMPRESSED_PUBKEY_HEX_LEN) {
+    throw new Error(
+      `Invalid meta-address: expected 66 or 132 hex chars of compressed keys, got ${keysHex.length}`,
+    );
   }
 
-  // Each uncompressed public key is 65 bytes = 130 hex chars
-  const keysHex = hex.replace('0x', '');
-  if (keysHex.length < 260) {
-    throw new Error('Invalid meta-address: too short');
-  }
-
-  const spendingPublicKey = `0x${keysHex.slice(0, 130)}` as `0x${string}`;
-  const viewingPublicKey = `0x${keysHex.slice(130, 260)}` as `0x${string}`;
+  const spendingPublicKey = `0x${keysHex.slice(0, COMPRESSED_PUBKEY_HEX_LEN)}` as `0x${string}`;
+  const viewingPublicKey =
+    keysHex.length === 132
+      ? (`0x${keysHex.slice(COMPRESSED_PUBKEY_HEX_LEN)}` as `0x${string}`)
+      : spendingPublicKey;
 
   return {
     metaAddress,
@@ -191,12 +179,9 @@ export function detectPayment(
   keyBundle: StealthKeyBundle,
 ): DetectedPayment | null {
   try {
-    const metadata = announcement.metadata;
-    const metadataBytes = hexToBytes(metadata);
-
-    // The view tag is at byte index 1 (byte 0 is the scheme indicator/version)
-    const announcedViewTagByte = metadataBytes.length > 1 ? metadataBytes[1] : metadataBytes[0];
-    const viewTagHex = `0x${announcedViewTagByte.toString(16).padStart(2, '0')}` as `0x${string}`;
+    // ERC-5564: the view tag is byte 0 of the metadata. (Everything after it
+    // is optional transfer metadata — token identifier, amount, etc.)
+    const viewTagHex = getViewTagFromMetadata(announcement.metadata) as `0x${string}`;
 
     // Use the SDK to check if this announcement belongs to us
     const isMatch = checkStealthAddress({
@@ -258,10 +243,21 @@ export function scanAnnouncements(
 
 /**
  * Encode a view tag as the metadata bytes for the ERC-5564 Announcer.
- * Scheme 1 metadata format: 0x01<viewTag>
+ *
+ * ERC-5564 metadata layout: byte 0 is the view tag; any further bytes describe
+ * the transfer (token identifier, amount, ...). We publish the minimal 1-byte
+ * form — the amount is deliberately left out of the announcement, since
+ * putting it there would hand scanners a correlation handle for free. The
+ * value is still visible in the funding transaction itself.
  */
 export function encodeAnnouncerMetadata(viewTag: string | number): `0x${string}` {
-  let hexTag = typeof viewTag === 'number' ? viewTag.toString(16).padStart(2, '0') : viewTag.replace('0x', '');
-  if (hexTag.length % 2 !== 0) hexTag = '0' + hexTag;
-  return `0x01${hexTag}` as `0x${string}`;
+  let hexTag =
+    typeof viewTag === 'number'
+      ? viewTag.toString(16).padStart(2, '0')
+      : viewTag.replace('0x', '');
+  if (hexTag.length % 2 !== 0) hexTag = `0${hexTag}`;
+  if (hexTag.length !== 2) {
+    throw new Error(`Invalid view tag: expected exactly 1 byte, got "${viewTag}"`);
+  }
+  return `0x${hexTag}` as `0x${string}`;
 }

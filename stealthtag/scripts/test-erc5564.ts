@@ -6,6 +6,7 @@
  */
 
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
+import { compressedPublicKey } from '../lib/keys';
 import {
   generateStealthAddress,
   checkStealthAddress,
@@ -22,19 +23,22 @@ async function runTest() {
   const spendPriv = generatePrivateKey();
   const viewPriv = generatePrivateKey();
   const spendAcc = privateKeyToAccount(spendPriv);
-  const viewAcc = privateKeyToAccount(viewPriv);
 
-  const metaAddress = encodeMetaAddress(spendAcc.publicKey, viewAcc.publicKey);
+  // ERC-5564 Scheme 1 meta-addresses use COMPRESSED (33-byte) public keys.
+  const spendPub = compressedPublicKey(spendPriv);
+  const viewPub = compressedPublicKey(viewPriv);
+
+  const metaAddress = encodeMetaAddress(spendPub, viewPub);
   console.log('1. Recipient Meta-Address:');
-  console.log('   Spending PubKey:', spendAcc.publicKey.slice(0, 30) + '...');
-  console.log('   Viewing PubKey: ', viewAcc.publicKey.slice(0, 30) + '...');
+  console.log('   Spending PubKey:', spendPub.slice(0, 30) + '...');
+  console.log('   Viewing PubKey: ', viewPub.slice(0, 30) + '...');
   console.log('   Meta-Address:   ', metaAddress);
 
   const recipientBundle: StealthKeyBundle = {
     spendingPrivateKey: spendPriv,
-    spendingPublicKey: spendAcc.publicKey,
+    spendingPublicKey: spendPub,
     viewingPrivateKey: viewPriv,
-    viewingPublicKey: viewAcc.publicKey,
+    viewingPublicKey: viewPub,
     metaAddress,
     ownerAddress: spendAcc.address,
   };
@@ -55,7 +59,8 @@ async function runTest() {
     schemeId: 1n,
     stealthAddress: genResult.stealthAddress as `0x${string}`,
     ephemeralPubKey: genResult.ephemeralPublicKey as `0x${string}`,
-    metadata: `0x01${genResult.viewTag.replace('0x', '')}` as `0x${string}`,
+    // ERC-5564: the view tag is byte 0 of the metadata.
+    metadata: genResult.viewTag as `0x${string}`,
     blockNumber: 7100000n,
     transactionHash: '0x1111111111111111111111111111111111111111111111111111111111111111',
     caller: '0x2222222222222222222222222222222222222222',
@@ -87,10 +92,13 @@ async function runTest() {
   const otherSpendPriv = generatePrivateKey();
   const otherRecipient: StealthKeyBundle = {
     spendingPrivateKey: otherSpendPriv,
-    spendingPublicKey: privateKeyToAccount(otherSpendPriv).publicKey,
+    spendingPublicKey: compressedPublicKey(otherSpendPriv),
     viewingPrivateKey: otherViewPriv,
-    viewingPublicKey: privateKeyToAccount(otherViewPriv).publicKey,
-    metaAddress: 'st:eth:0x...',
+    viewingPublicKey: compressedPublicKey(otherViewPriv),
+    metaAddress: encodeMetaAddress(
+      compressedPublicKey(otherSpendPriv),
+      compressedPublicKey(otherViewPriv),
+    ),
     ownerAddress: privateKeyToAccount(otherSpendPriv).address,
   };
 

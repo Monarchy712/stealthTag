@@ -1,196 +1,258 @@
 /**
  * lib/smartAccount.ts
  * --------------------
- * Smart account creation and sponsored sweep via ERC-4337.
+ * Sweeping an ERC-5564 stealth address via an EIP-7702 + ERC-4337
+ * UserOperation, sponsored by a Paymaster, submitted through the relay.
  *
- * Architecture:
- *   EOA signer → Kernel v3 Smart Account → UserOperation → Pimlico Bundler
- *                                                                ↑
- *                                                     Paymaster sponsors gas
+ * ---------------------------------------------------------------------------
+ * THE PROBLEM THIS SOLVES
+ * ---------------------------------------------------------------------------
+ * An ERC-5564 Scheme 1 stealth address is `publicKeyToAddress(stealthPubKey)`:
+ * a plain **EOA**, controlled by the stealth private key that `computeStealthKey`
+ * reconstructs. ETH sent by the sender sits at that EOA. To move it, a
+ * transaction must originate there — and a bare EOA must pay its own gas.
  *
- * WHY ACCOUNT ABSTRACTION HERE:
- *   Sweeping funds from a stealth address requires gas AT that address.
- *   Funding it from a known wallet would re-link it, destroying privacy.
- *   The Paymaster pays the gas so the stealth address never needs ETH from
- *   a known source — this is the entire reason AA is used in StealthTag.
+ * Funding it from the recipient's known wallet would publish exactly the link
+ * stealth addresses exist to avoid:
  *
- * We use:
- *   - permissionless.js for the smart account + UserOperation construction
- *   - Pimlico for the bundler and verifying paymaster
- *   - Kernel v3 (ZeroDev) as the smart account implementation
+ *     known wallet ──funds gas──▶ stealth address ──sweep──▶ destination
+ *                    ^^^^^^^^^^ one hop, trivially followed
+ *
+ * ---------------------------------------------------------------------------
+ * WHY EIP-7702 AND NOT A COUNTERFACTUAL SMART ACCOUNT
+ * ---------------------------------------------------------------------------
+ * The previous implementation built a Kernel v3 account *owned by* the stealth
+ * key. That account lives at a DIFFERENT address from the stealth EOA:
+ *
+ *     stealth EOA        0x556a…0587   ← the ETH is here
+ *     Kernel v3 account  0xeAF1…Fbd5   ← the UserOperation came from here (0 wei)
+ *
+ * so every sweep failed. Moving the funds into that account first would need a
+ * transaction from the EOA — the original problem, unsolved.
+ *
+ * EIP-7702 removes the mismatch instead of working around it. The stealth EOA
+ * signs an authorization delegating its code to a stateless smart-account
+ * implementation; the account address IS the EOA address. The ERC-5564
+ * receiving address and the ERC-4337 `sender` are then the same address, and
+ * NO migration or forwarding transfer is required — so nothing about the
+ * stealth-address unlinkability is given up to get executability.
+ *
+ * Signing the authorization and the UserOperation both cost the stealth
+ * address nothing: the Paymaster pays, and the bundler submits.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT THIS DOES *NOT* GIVE YOU
+ * ---------------------------------------------------------------------------
+ * Gas sponsorship is not privacy. This removes the INBOUND funding link. It
+ * does nothing about the OUTBOUND one: sweeping to your known wallet publishes
+ * `stealthAddress → knownWallet` on-chain, and amount correlation does the
+ * rest. Choosing the destination is the user's decision and the single largest
+ * remaining correlation risk. See PRIVACY.md.
  */
 
 import { createSmartAccountClient } from 'permissionless';
-import { toKernelSmartAccount } from 'permissionless/accounts';
+import { to7702SimpleSmartAccount } from 'permissionless/accounts';
 import { createPimlicoClient } from 'permissionless/clients/pimlico';
-import { entryPoint07Address } from 'viem/account-abstraction';
-import {
-  createPublicClient,
-  http,
-  parseEther,
-  formatEther,
-  type Account,
-  type LocalAccount,
-} from 'viem';
+import { entryPoint08Address } from 'viem/account-abstraction';
+import { createPublicClient, formatEther, type LocalAccount } from 'viem';
 import { sepolia } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
-import { getPimlicoUrl, isDemoMode } from './chain';
+import { relayBundlerTransport, relayRpcTransport } from './relay';
 import type { DetectedPayment } from '@/types';
 
+/**
+ * The stateless EIP-7702 delegate the stealth EOA points at.
+ * `Simple7702Account` from eth-infinitism, the default in permissionless.js.
+ * Verified deployed on Sepolia (3639 bytes) — see scripts/test-relay.ts.
+ */
+export const EIP7702_IMPLEMENTATION =
+  '0xe6Cae83BdE06E4c305530e199D7217f42808555B' as `0x${string}`;
+
+/** EIP-7702 UserOperations require EntryPoint v0.8. */
+export const ENTRYPOINT_ADDRESS = entryPoint08Address;
+
 // ===========================================================
-// Smart Account Setup (recipient side)
+// Account construction
 // ===========================================================
 
 /**
- * Create a Kernel v3 smart account for the given signer.
+ * Build the EIP-7702 smart account for a stealth key.
  *
- * The smart account address is deterministic — it's derived from the
- * signer address. The account doesn't need to be deployed before first use
- * (the bundler handles counterfactual deployment on first UserOp).
- *
- * @param signerAccount - The EOA account (from wagmi's walletClient.account or privateKeyToAccount)
- * @param rpcUrl        - Sepolia RPC URL
- * @param pimlicoApiKey - Pimlico API key
+ * The returned account's address is EXACTLY `signer.address` — the ERC-5564
+ * stealth address. That identity is the whole point; `assertAccountIsStealthAddress`
+ * enforces it rather than trusting it.
  */
-export async function createKernelSmartAccount(
-  signerAccount: LocalAccount,
-  rpcUrl: string,
-  pimlicoApiKey: string,
-) {
-  const pimlicoUrl = getPimlicoUrl(pimlicoApiKey);
-
+export async function createStealthSmartAccount(signer: LocalAccount) {
   const publicClient = createPublicClient({
     chain: sepolia,
-    transport: http(rpcUrl),
+    transport: relayRpcTransport(),
   });
 
-  const pimlicoClient = createPimlicoClient({
-    transport: http(pimlicoUrl),
-    entryPoint: {
-      address: entryPoint07Address,
-      version: '0.7',
-    },
-  });
-
-  // Create Kernel v3 smart account
-  const kernelAccount = await toKernelSmartAccount({
+  const account = await to7702SimpleSmartAccount({
     client: publicClient,
-    entryPoint: {
-      address: entryPoint07Address,
-      version: '0.7',
-    },
-    owners: [signerAccount],
-    version: '0.3.1',
+    owner: signer,
   });
 
-  // Create the smart account client with paymaster
-  const smartAccountClient = createSmartAccountClient({
-    account: kernelAccount,
-    chain: sepolia,
-    bundlerTransport: http(pimlicoUrl),
-    paymaster: pimlicoClient,
-    userOperation: {
-      estimateFeesPerGas: async () => {
-        return (await pimlicoClient.getUserOperationGasPrice()).fast;
-      },
-    },
-  });
+  assertAccountIsStealthAddress(account.address, signer.address);
 
-  return {
-    smartAccountClient,
-    smartAccountAddress: kernelAccount.address,
-    kernelAccount,
-  };
+  return { account, publicClient };
 }
 
 /**
- * Get the counterfactual smart account address for a signer.
- * This is deterministic and doesn't require an on-chain transaction.
+ * Reconciliation gate: the address executing the UserOperation must be the
+ * address that received the ERC-5564 payment. If these ever diverge, the funds
+ * are not reachable and the sweep must not be attempted.
  */
-export async function getSmartAccountAddress(
-  signerAccount: LocalAccount,
-  rpcUrl: string,
-  pimlicoApiKey: string,
-): Promise<`0x${string}`> {
-  try {
-    const { smartAccountAddress } = await createKernelSmartAccount(
-      signerAccount,
-      rpcUrl,
-      pimlicoApiKey,
+export function assertAccountIsStealthAddress(
+  accountAddress: `0x${string}`,
+  stealthAddress: `0x${string}`,
+): void {
+  if (accountAddress.toLowerCase() !== stealthAddress.toLowerCase()) {
+    throw new Error(
+      `Account/stealth address mismatch: UserOperation sender ${accountAddress} ` +
+        `is not the stealth address ${stealthAddress} that holds the funds. ` +
+        `Refusing to build a UserOperation that cannot move them.`,
     );
-    return smartAccountAddress;
-  } catch {
-    // Fallback for demo mode or missing config
-    return '0x0000000000000000000000000000000000000000';
   }
 }
 
+/**
+ * Counterfactual sweep address for a detected payment — always the stealth
+ * address itself under EIP-7702. Exposed so the UI can show that no second
+ * address is involved.
+ */
+export function sweepSenderAddress(payment: DetectedPayment): `0x${string}` {
+  return privateKeyToAccount(payment.stealthPrivateKey).address;
+}
+
 // ===========================================================
-// Sponsored Sweep (recipient side)
+// Sponsored sweep
 // ===========================================================
 
 /**
- * Sweep funds from a detected stealth address to the recipient's wallet.
+ * How the sweep's gas is paid.
  *
- * This is the core AA use case in StealthTag:
- *   1. We use the stealth address's private key to sign a UserOperation
- *   2. The UserOperation transfers funds to the recipient's smart account / wallet
- *   3. The Pimlico Paymaster SPONSORS the gas — so the stealth address
- *      never needs to be funded from a known wallet
+ * 'self-funded' — the stealth address prefunds the EntryPoint out of the ETH
+ *   it already received. NO third party is involved in payment, so there is no
+ *   Paymaster to correlate against and no sponsorship record tying this sweep
+ *   to any other. Strictly the *less* correlated of the two. Costs: the
+ *   payment must exceed gas, and the EntryPoint refunds unused prefund to the
+ *   account's deposit rather than its balance, leaving a small residue at the
+ *   stealth address.
  *
- * The sweep executes as:
- *   Stealth key (signer) → UserOperation → Bundler → EntryPoint → transfer
+ * 'sponsored' — a Paymaster pays. Required when the stealth address holds no
+ *   ETH (an ERC-20-only payment) or when the amount is too small to cover gas,
+ *   and it lets the full balance be swept with nothing left behind. Cost: the
+ *   Paymaster sees and records every UserOperation it sponsors, so all sweeps
+ *   under one API key are grouped by the sponsor.
  *
- * @param payment       - The detected payment to sweep
- * @param toAddress     - Destination address (recipient's smart account or EOA)
- * @param rpcUrl        - Sepolia RPC URL
- * @param pimlicoApiKey - Pimlico bundler + paymaster API key
+ * Neither option provides anonymity; they trade different correlations.
+ */
+export type GasMode = 'self-funded' | 'sponsored';
+
+export interface SweepResult {
+  /** The submitted UserOperation hash. */
+  userOpHash: `0x${string}`;
+  /** The transaction that included it (available after inclusion). */
+  transactionHash: `0x${string}`;
+  /** The stealth address the funds moved from (= the UserOp sender). */
+  from: `0x${string}`;
+  /** The destination the user chose. */
+  to: `0x${string}`;
+  /** Amount swept, in wei. */
+  value: bigint;
+  /** How gas was paid. */
+  gasMode: GasMode;
+}
+
+/**
+ * Sweep a detected stealth payment to a destination the user chooses.
+ *
+ * Lifecycle:
+ *   1. Reconstruct the stealth EOA from the detected stealth private key.
+ *   2. Wrap it as an EIP-7702 account at the SAME address.
+ *   3. Build a UserOperation moving the balance to `toAddress`.
+ *   4. The relay fetches Paymaster sponsorship and gas prices (browser never
+ *      talks to Pimlico).
+ *   5. The stealth key signs the 7702 authorization and the UserOperation
+ *      in the browser. No key material reaches the relay.
+ *   6. The relay submits it to the bundler; EntryPoint executes it.
+ *
+ * @param payment   - Detected payment carrying the stealth private key
+ * @param toAddress - Destination. NOT defaulted to the connected wallet:
+ *                    that choice is the dominant on-chain correlation risk and
+ *                    must be made explicitly by the user.
+ * @param gasMode   - See {@link GasMode}. Defaults to 'sponsored'.
  */
 export async function sponsoredSweep(
   payment: DetectedPayment,
   toAddress: `0x${string}`,
-  rpcUrl: string,
-  pimlicoApiKey: string,
-): Promise<`0x${string}`> {
-  if (isDemoMode()) {
-    throw new Error('DEMO_MODE: Use simulateSweep instead');
+  gasMode: GasMode = 'sponsored',
+): Promise<SweepResult> {
+  if (!toAddress || !/^0x[0-9a-fA-F]{40}$/.test(toAddress)) {
+    throw new Error('A valid destination address is required for the sweep.');
   }
 
-  // The stealth address's private key is the signer for this UserOperation
+  // 1-2. The stealth EOA, wrapped as an EIP-7702 account at the same address.
   const stealthSigner = privateKeyToAccount(payment.stealthPrivateKey);
+  const { account, publicClient } = await createStealthSmartAccount(stealthSigner);
 
-  // Create a Kernel smart account using the stealth key as signer
-  // This creates a counterfactual smart account at the stealth address
-  const { smartAccountClient } = await createKernelSmartAccount(
-    stealthSigner,
-    rpcUrl,
-    pimlicoApiKey,
-  );
+  // 3. Work out how much can move.
+  const balance = await publicClient.getBalance({ address: account.address });
+  if (balance === 0n) {
+    throw new Error(`Stealth address ${account.address} has no balance to sweep.`);
+  }
 
-  // Get balance of the stealth address
-  const publicClient = createPublicClient({
-    chain: sepolia,
-    transport: http(rpcUrl),
+  // 4. Bundler (and, when sponsoring, the paymaster) — reached only via the relay.
+  const pimlicoClient = createPimlicoClient({
+    transport: relayBundlerTransport(),
+    entryPoint: { address: ENTRYPOINT_ADDRESS, version: '0.8' },
   });
 
-  const balance = await publicClient.getBalance({ address: payment.stealthAddress });
+  const gasPrice = (await pimlicoClient.getUserOperationGasPrice()).fast;
 
-  if (balance === 0n) {
-    throw new Error('Stealth address has no balance to sweep');
+  // Under sponsorship the account pays nothing, so the whole balance moves and
+  // nothing is left behind. Self-funded, it must retain enough to prefund the
+  // EntryPoint; `GAS_RESERVE_GAS` is a deliberately generous bound.
+  const GAS_RESERVE_GAS = 400_000n;
+  const gasReserve =
+    gasMode === 'sponsored' ? 0n : GAS_RESERVE_GAS * (gasPrice.maxFeePerGas ?? 0n);
+
+  if (gasMode === 'self-funded' && balance <= gasReserve) {
+    throw new Error(
+      `Stealth address holds ${balance} wei, which cannot cover its own gas ` +
+        `(~${gasReserve} wei). Use gasMode 'sponsored' for this payment.`,
+    );
   }
+  const sweepAmount = balance - gasReserve;
 
-  // The paymaster covers gas so we can sweep full balance
-  const sweepAmount = balance;
+  const smartAccountClient = createSmartAccountClient({
+    account,
+    chain: sepolia,
+    bundlerTransport: relayBundlerTransport(),
+    // No paymaster at all in self-funded mode: nothing to sponsor, nobody to
+    // record the sponsorship.
+    paymaster: gasMode === 'sponsored' ? pimlicoClient : undefined,
+    userOperation: { estimateFeesPerGas: async () => gasPrice },
+  });
 
-  // Execute the sweep as a sponsored UserOperation
-  // The Paymaster pays the gas — the stealth address is NOT funded with ETH for gas
-  const txHash = await smartAccountClient.sendTransaction({
+  // 5-6. Sign locally, submit via the relay, wait for inclusion.
+  const userOpHash = await smartAccountClient.sendUserOperation({
+    calls: [{ to: toAddress, value: sweepAmount, data: '0x' }],
+  });
+
+  const receipt = await smartAccountClient.waitForUserOperationReceipt({
+    hash: userOpHash,
+  });
+
+  return {
+    userOpHash,
+    transactionHash: receipt.receipt.transactionHash,
+    from: account.address,
     to: toAddress,
     value: sweepAmount,
-    data: '0x',
-  });
-
-  return txHash as `0x${string}`;
+    gasMode,
+  };
 }
 
 // ===========================================================
@@ -198,35 +260,24 @@ export async function sponsoredSweep(
 // ===========================================================
 
 /**
- * Simulate a sweep transaction for demo mode.
+ * Simulate a sweep. Returns an obviously-fake hash prefixed `0xDEMO`.
  *
- * Returns a fake tx hash and clearly marks it as simulated.
- * Use this when the bundler/Paymaster is unavailable.
- *
- * NOTE: This does NOT execute a real transaction.
- * The stealth derivation and detection remain real; only the sweep is simulated.
+ * NOTE: This executes NO transaction. Detection and derivation stay real;
+ * only submission is simulated. Used when the relay is unconfigured, so the
+ * app never silently falls back to a direct browser→Pimlico call.
  */
 export async function simulateSweep(
   payment: DetectedPayment,
   toAddress: `0x${string}`,
 ): Promise<`0x${string}`> {
-  // Simulate network delay
   await new Promise((r) => setTimeout(r, 2000));
-
-  // Return a deterministic fake hash for demo purposes
-  const fakeHash =
-    `0xDEMO${payment.stealthAddress.slice(2, 10)}${toAddress.slice(2, 10)}${'0'.repeat(40)}` as `0x${string}`;
-
-  return fakeHash;
+  return `0xDEMO${payment.stealthAddress.slice(2, 10)}${toAddress.slice(2, 10)}${'0'.repeat(40)}` as `0x${string}`;
 }
 
 // ===========================================================
 // Utility
 // ===========================================================
 
-/**
- * Format an ETH balance for display.
- */
 export function formatEthBalance(balance: bigint): string {
   return parseFloat(formatEther(balance)).toFixed(6);
 }

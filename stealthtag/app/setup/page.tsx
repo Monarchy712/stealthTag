@@ -31,16 +31,19 @@ import type { TxState } from '@/types';
 export default function SetupPage() {
   const { address, isConnected } = useAccount();
   const { data: walletClient } = useWalletClient();
-  const { keyBundle, keyState, error: keyError, generateKeys } = useStealthKeys();
+  const { keyBundle, publicBundle, keyState, error: keyError, generateKeys, lockKeys } =
+    useStealthKeys();
+
+  const [passphrase, setPassphrase] = useState('');
 
   const [regState, setRegState] = useState<TxState>({ status: 'idle' });
   const [copied, setCopied] = useState(false);
 
   async function handleRegister() {
-    if (!walletClient || !keyBundle) return;
+    if (!walletClient || !publicBundle) return;
     setRegState({ status: 'pending' });
     try {
-      const hash = await registerMetaAddress(walletClient, keyBundle.metaAddress);
+      const hash = await registerMetaAddress(walletClient, publicBundle.metaAddress);
       setRegState({ status: 'confirmed', hash });
     } catch (err: any) {
       setRegState({ status: 'failed', error: err?.message ?? 'Registration failed' });
@@ -48,8 +51,8 @@ export default function SetupPage() {
   }
 
   function copyMeta() {
-    if (!keyBundle) return;
-    navigator.clipboard.writeText(keyBundle.metaAddress);
+    if (!publicBundle) return;
+    navigator.clipboard.writeText(publicBundle.metaAddress);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }
@@ -78,7 +81,7 @@ export default function SetupPage() {
       />
 
       {/* Address distinctions — educational */}
-      <AddressDistinctionPanel address={address!} keyBundle={keyBundle} />
+      <AddressDistinctionPanel address={address!} publicBundle={publicBundle} />
 
       <div className="grid lg:grid-cols-2 gap-6 mt-6">
         {/* Step 1: Generate keys */}
@@ -88,16 +91,29 @@ export default function SetupPage() {
             <div>
               <h3 className="font-bold text-white">Generate stealth keys</h3>
               <p className="text-xs text-gray-500 mt-0.5">
-                Sign two messages to derive your spending + viewing keys
+                One wallet signature + your passphrase → spending & viewing keys
               </p>
             </div>
           </div>
 
-          {keyState === 'not_generated' && (
+          {(keyState === 'not_generated' || keyState === 'error') && (
             <AlertBox type="info">
-              You&apos;ll sign two messages with your wallet. No funds are at risk —
-              these are deterministic key derivation signatures. You can regenerate
-              your keys anytime by signing the same messages.
+              You&apos;ll sign one message with your wallet and choose a passphrase.
+              No funds are at risk — the signature only moves data. Both inputs are
+              required: the signature alone cannot reconstruct your stealth keys, so
+              a malicious site that tricks you into signing cannot derive them.
+              The same wallet + same passphrase always regenerates the same keys.
+            </AlertBox>
+          )}
+
+          {keyState === 'locked' && (
+            <AlertBox type="info">
+              <p className="font-medium mb-1">Keys locked</p>
+              <p className="text-xs opacity-80">
+                Your meta-address is stored on this device, but the private keys are
+                not — they are never written to disk. Enter your passphrase and sign
+                once to unlock scanning and sweeping for this session.
+              </p>
             </AlertBox>
           )}
 
@@ -134,19 +150,57 @@ export default function SetupPage() {
             </AlertBox>
           )}
 
+          <div className="mt-4">
+            <label
+              htmlFor="stealth-passphrase"
+              className="block text-xs text-gray-500 mb-1"
+            >
+              StealthTag passphrase
+            </label>
+            <input
+              id="stealth-passphrase"
+              type="password"
+              autoComplete="off"
+              value={passphrase}
+              onChange={(e) => setPassphrase(e.target.value)}
+              placeholder="Never leaves this device"
+              className="w-full bg-gray-950 border border-gray-800 rounded-xl px-3 py-2 text-sm
+                         text-gray-200 font-mono placeholder:text-gray-700 focus:outline-none
+                         focus:border-indigo-600"
+            />
+            <p className="text-[11px] text-gray-600 mt-1.5 leading-relaxed">
+              Lose this and you lose access to funds at your stealth addresses — it is
+              half of the key material. It is never sent anywhere and never stored.
+            </p>
+          </div>
+
           <Button
-            onClick={generateKeys}
+            onClick={() => generateKeys(passphrase)}
             loading={keyState === 'generating'}
-            disabled={keyState === 'generating'}
-            className="mt-4 w-full"
+            disabled={keyState === 'generating' || passphrase.length === 0}
+            className="mt-3 w-full"
           >
             <Key className="w-4 h-4" />
-            {keyState === 'generated'
-              ? 'Regenerate keys'
-              : keyState === 'generating'
-              ? 'Waiting for signatures…'
-              : 'Generate stealth keys'}
+            {keyState === 'generating'
+              ? 'Waiting for signature…'
+              : keyState === 'generated'
+              ? 'Re-derive keys'
+              : keyState === 'locked'
+              ? 'Unlock keys'
+              : 'Derive stealth keys'}
           </Button>
+
+          {keyState === 'generated' && (
+            <button
+              onClick={() => {
+                setPassphrase('');
+                lockKeys();
+              }}
+              className="mt-2 w-full text-xs text-gray-600 hover:text-gray-400"
+            >
+              Lock keys (clear private keys from memory)
+            </button>
+          )}
         </Card>
 
         {/* Step 2: Meta-address + Register */}
@@ -161,7 +215,7 @@ export default function SetupPage() {
             </div>
           </div>
 
-          {!keyBundle ? (
+          {!publicBundle ? (
             <div className="text-center py-8 text-gray-600 text-sm">
               Complete Step 1 first
             </div>
@@ -172,7 +226,7 @@ export default function SetupPage() {
                   <div className="min-w-0">
                     <p className="text-xs text-gray-500 mb-1">Your handle (meta-address)</p>
                     <p className="font-mono text-xs text-indigo-300 break-all leading-relaxed">
-                      {keyBundle.metaAddress}
+                      {publicBundle.metaAddress}
                     </p>
                   </div>
                   <button
@@ -218,7 +272,7 @@ export default function SetupPage() {
       </div>
 
       {/* Done state */}
-      {keyBundle && regState.status === 'confirmed' && (
+      {publicBundle && regState.status === 'confirmed' && (
         <Card className="mt-6 border-emerald-800/40 bg-emerald-950/20">
           <div className="flex items-start gap-3">
             <CheckCircle2 className="w-6 h-6 text-emerald-400 flex-shrink-0 mt-0.5" />
@@ -244,10 +298,10 @@ export default function SetupPage() {
 // ── Address Distinction Panel ─────────────────────────────────
 function AddressDistinctionPanel({
   address,
-  keyBundle,
+  publicBundle,
 }: {
   address: string;
-  keyBundle: ReturnType<typeof useStealthKeys>['keyBundle'];
+  publicBundle: ReturnType<typeof useStealthKeys>['publicBundle'];
 }) {
   return (
     <Card className="bg-gray-950/60">
@@ -265,8 +319,8 @@ function AddressDistinctionPanel({
         <div className="bg-gray-900 rounded-xl p-3">
           <p className="text-indigo-400 font-medium mb-1">Stealth Meta-address</p>
           <p className="font-mono text-gray-400 break-all">
-            {keyBundle
-              ? `${keyBundle.metaAddress.slice(0, 20)}…`
+            {publicBundle
+              ? `${publicBundle.metaAddress.slice(0, 20)}…`
               : 'Generate keys first'}
           </p>
           <p className="text-gray-600 mt-1">Your handle. Safe to publish publicly.</p>

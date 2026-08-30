@@ -102,7 +102,7 @@ If the bundler or Paymaster is unavailable:
 
 ```
 Setup page:
-  ✓ Two wallet signatures → stealth keys generated
+  ✓ One wallet signature + passphrase → stealth keys derived
   ✓ Meta-address displayed
   ✓ ERC-6538 registration tx confirmed on Sepolia
 
