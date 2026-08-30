@@ -195,6 +195,15 @@ export async function sponsoredSweep(
 
   // 1-2. The stealth EOA, wrapped as an EIP-7702 account at the same address.
   const stealthSigner = privateKeyToAccount(payment.stealthPrivateKey);
+
+  // Defence in depth: the key must actually control the address it claims to.
+  // `detectPayment` already enforces this, and demo-mode placeholder keys are
+  // short-circuited into `simulateSweep` before reaching here — but a real
+  // transaction path must never rely on a caller upstream having checked.
+  // Without this, a wrong key would silently build an account at a DIFFERENT
+  // address and attempt to sweep funds that are not there.
+  assertAccountIsStealthAddress(stealthSigner.address, payment.stealthAddress);
+
   const { account, publicClient } = await createStealthSmartAccount(stealthSigner);
 
   // 3. Work out how much can move.

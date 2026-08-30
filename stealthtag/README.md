@@ -172,14 +172,30 @@ npm run build && npm start        # http://localhost:3000
 
 ### Test
 
+Four different kinds of verification. They prove different things, so they are kept separate:
+
+| Kind | Command | What it actually proves | Assertions |
+|---|---|---|---|
+| **Local unit** | `npm test` | Cryptography, HKDF key management, ERC-5564 derivation/detection, relay security. No chain, no network. | 100 |
+| **Local chain (forked)** | `npm run anvil` then `npm run test:sweep` | A full sweep on a **real EVM** — Sepolia forked into anvil, real EntryPoint v0.8, real EIP-7702 delegation, real `handleOps`. | 27 |
+| **Automated browser** | `npm start` then `npm run test:ui` | The **real UI** in headless Chromium: hydration, console errors, forms, disabled states, privacy copy, and that the browser makes zero third-party requests. | 73 |
+| **Live Sepolia** | `npm run verify:live` | Talks to the **real Pimlico Paymaster** through the relay and obtains a genuine sponsorship quote. **Spends nothing.** | 11 |
+
+The browser suite signs with a real EIP-1193 provider backed by a viem account — real secp256k1 signatures, not canned bytes. Nothing in any suite mocks a StealthTag code path.
+
+**The live sponsored sweep has already been executed on Sepolia** — the transaction links are in the [Demo](#demo--what-a-judge-should-see) section above. To run it again yourself:
+
 ```bash
-npm test              # crypto, keys, relay security   (100 assertions)
-npm run test:ui       # real browser via Playwright     (73 assertions)
-npm run test:sweep    # end-to-end sweep on a forked chain — run `npm run anvil` first
-npm run verify:live   # preflight against live Pimlico — spends nothing
+npm run verify:live -- --execute    # spends real Sepolia testnet ETH
 ```
 
-`npm run verify:live -- --execute` runs the full sponsored sweep on Sepolia and **spends real testnet ETH**. Run the preflight first.
+### The one remaining limitation
+
+**Broadcasting a transaction from the browser requires a funded wallet, so that step is not covered by any automated suite.**
+
+Concretely, `npm run test:ui` exercises `/setup`, `/send` and `/scan` up to the point of submission — deriving keys, resolving handles, generating stealth addresses, validating forms — but its wallet holds no ETH, so ERC-6538 registration, the ETH transfer, the announcement, and the sweep are **not** broadcast from the browser. The suite prints this limitation when it finishes rather than hiding it.
+
+That last mile is covered two other ways: the sweep itself is **verified live on Sepolia** (links above), and end-to-end on a forked chain by `npm run test:sweep`. To close it in the browser, connect MetaMask on Sepolia with a little test ETH and walk through the demo steps manually.
 
 ---
 
@@ -198,6 +214,6 @@ app/setup|send|scan|explore    the four UI routes
 
 ## Status
 
-The cryptography, the funding architecture, and the sponsored sweep are **verified live on Sepolia**. The UI is verified by an automated browser suite. Broadcasting transactions *from the browser* needs a funded wallet, so that last mile is exercised manually — `npm run test:ui` prints exactly what it could and could not cover.
+The cryptography, the funding architecture, and the sponsored sweep are **verified live on Sepolia**. The UI is verified by an automated browser suite. Broadcasting a transaction *from the browser* needs a funded wallet — see [The one remaining limitation](#the-one-remaining-limitation).
 
 Testnet only. Not audited. Do not use with real funds.
