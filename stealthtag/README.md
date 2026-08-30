@@ -116,6 +116,8 @@ This is a design decision, not a gap. Stealth-address cryptography is the part t
 
 Every address above is checked for deployed bytecode at test time by `npm run test:relay`.
 
+**Reference interfaces for all five are in [`contracts/`](../contracts/)**, each naming its upstream source and live address, so you can read the on-chain surface without leaving the repo. Nothing in that folder was written or deployed by this project.
+
 ---
 
 ## Tech Stack
