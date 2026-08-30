@@ -98,6 +98,26 @@ Full actor-by-actor analysis: [`PRIVACY.md`](./PRIVACY.md). Key handling: [`SECU
 
 ---
 
+## Contracts — we deploy none, deliberately
+
+**StealthTag ships no custom Solidity.** Every contract it touches is already deployed and canonical on Sepolia:
+
+| Contract | Address | Role |
+|---|---|---|
+| ERC-5564 Announcer | `0x55649E01B5Df198D18D95b5cc5051630cfD45564` | Publishes the ephemeral key + view tag for each payment |
+| ERC-6538 Registry | `0x6538E6bf4B0eBd30A8Ea093027Ac2422ce5d6538` | Maps an address to a published stealth meta-address |
+| EntryPoint v0.8 | `0x4337084D9E255Ff0702461CF8895CE9E3b5Ff108` | Executes the ERC-4337 UserOperation |
+| Simple7702Account | `0xe6Cae83BdE06E4c305530e199D7217f42808555B` | The EIP-7702 delegate the stealth EOA points at |
+| Pimlico Paymaster | `0x888888888888Ec68A58AB8094Cc1AD20Ba3D2402` | Pays gas for the sponsored sweep |
+
+This is a design decision, not a gap. Stealth-address cryptography is the part that is easy to get subtly, catastrophically wrong — so we use the audited canonical deployments and ScopeLift's SDK for all elliptic-curve math rather than rolling our own. A bespoke Announcer or a custom stealth scheme would add attack surface and lose interoperability while solving nothing.
+
+**The engineering contribution is off-chain**: reconciling an ERC-5564 stealth EOA with an ERC-4337 sender via EIP-7702 so no migration hop is needed, domain-separated HKDF key management, and a relay that keeps the user's IP and the API key away from upstream infrastructure. All of it is verified — including a real sponsored sweep on Sepolia.
+
+Every address above is checked for deployed bytecode at test time by `npm run test:relay`.
+
+---
+
 ## Tech Stack
 
 - **ERC-5564** — stealth addresses (Scheme 1, secp256k1 + view tags)
