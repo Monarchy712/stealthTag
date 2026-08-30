@@ -236,9 +236,36 @@ export async function sponsoredSweep(
     userOperation: { estimateFeesPerGas: async () => gasPrice },
   });
 
-  // 5-6. Sign locally, submit via the relay, wait for inclusion.
+  // 5. Sign the EIP-7702 authorization ourselves.
+  //
+  //    viem 2.56 / permissionless 0.4 do NOT do this. `prepareUserOperation`
+  //    fills the authorization with fixed STUB r/s/yParity values so gas can be
+  //    estimated, and nothing ever replaces them with a real signature — there
+  //    is no `signAuthorization` call anywhere in viem's account-abstraction
+  //    module or in permissionless. A bundler then recovers a garbage signer
+  //    from the stub and rejects the operation with
+  //    "The recovered signer address does not match the userOperation sender".
+  //
+  //    `prepareUserOperation` returns a caller-supplied `authorization` object
+  //    verbatim, so signing it here fixes both estimation and submission.
+  //
+  //    The nonce is the account's own pending transaction count. It is NOT
+  //    incremented: the bundler, not the stealth address, is the transaction
+  //    executor, so the delegation applies at the account's current nonce.
+  const authorizationNonce = await publicClient.getTransactionCount({
+    address: account.address,
+    blockTag: 'pending',
+  });
+  const authorization = await stealthSigner.signAuthorization({
+    contractAddress: EIP7702_IMPLEMENTATION,
+    chainId: sepolia.id,
+    nonce: authorizationNonce,
+  });
+
+  // 6. Sign the UserOperation and submit via the relay, then wait for inclusion.
   const userOpHash = await smartAccountClient.sendUserOperation({
     calls: [{ to: toAddress, value: sweepAmount, data: '0x' }],
+    authorization,
   });
 
   const receipt = await smartAccountClient.waitForUserOperationReceipt({
